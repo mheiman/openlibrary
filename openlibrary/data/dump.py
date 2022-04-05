@@ -30,17 +30,14 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.DEBUG)
 
 
-def print_dump(json_records, filter=None):
+def print_dump(json_records, filter=None, print=print):
     """Print the given json_records in the dump format."""
-    for i, json_data in enumerate(json_records):
+    for i, raw_json_data in enumerate(json_records):
         if i % 1_000_000 == 0:
             log(f"{i:,}")
-        d = json.loads(json_data)
+        d = json.loads(raw_json_data)
         d.pop("id", None)
         d = _process_data(d)
-
-        if filter and filter(d) is False:
-            continue
 
         key = web.safestr(d["key"])
 
@@ -53,8 +50,12 @@ def print_dump(json_records, filter=None):
         if key.startswith(("/b/", "/scan", "/old/")) or not key.startswith("/"):
             continue
 
+        if filter and not filter(d):
+            continue
+
         type_key = d["type"]["key"]
         timestamp = d["last_modified"]["value"]
+        json_data = json.dumps(d)
 
         print("\t".join([type_key, key, str(d["revision"]), timestamp, json_data]))
 
@@ -231,51 +232,14 @@ def make_index(dump_file):
             created = "-"
         print("\t".join([web.safestr(path), web.safestr(title), created, timestamp]))
 
-
-def make_bsddb(dbfile, dump_file):
-    import bsddb
-
-    db = bsddb.btopen(dbfile, "w", cachesize=1024 * 1024 * 1024)
-
-    indexable_keys = {
-        "authors.key",
-        "works.key",  # edition
-        "authors.author.key",
-        "subjects",
-        "subject_places",
-        "subject_people",
-        "subject_times",  # work
-    }
-    for type, key, revision, timestamp, json_data in read_tsv(dump_file):
-        db[key] = json_data
-        d = json.loads(json_data)
-        index = [(k, v) for k, v in flatten_dict(d) if k in indexable_keys]
-        for k, v in index:
-            k = web.rstrips(k, ".key")
-            if k.startswith("subject"):
-                v = "/" + v.lower().replace(" ", "_")
-
-            dbkey = web.safestr(f"by_{k}{v}")
-            if dbkey in db:
-                db[dbkey] = db[dbkey] + " " + key
-            else:
-                db[dbkey] = key
-    db.close()
-    log("done")
-
-
 def _process_key(key):
-    mapping = (
-        "/l/",
-        "/languages/",
-        "/a/",
-        "/authors/",
-        "/b/",
-        "/books/",
-        "/user/",
-        "/people/",
-    )
-    for old, new in web.group(mapping, 2):
+    mapping = {
+        "/l/": "/languages/",
+        "/a/": "/authors/",
+        "/b/": "/books/",
+        "/user/": "/people/",
+    }
+    for old, new in mapping.items():
         if key.startswith(old):
             return new + key[len(old) :]
     return key
@@ -359,7 +323,6 @@ def main(cmd, args):
         "sort": sort_dump,
         "split": split_dump,
         "index": make_index,
-        "bsddb": make_bsddb,
         "sitemaps": generate_sitemaps,
         "htmlindex": generate_html_index,
     }.get(cmd)
@@ -367,7 +330,6 @@ def main(cmd, args):
         func(*args, **kwargs)
     elif cmd == "solrdump":
         from openlibrary.data import solr  # noqa: E402 avoid circular import
-
         solr.generate_dump(*args, **kwargs)
     else:
         logger.error(f"Unknown command: {cmd}")
