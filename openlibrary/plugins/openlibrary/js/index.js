@@ -139,7 +139,7 @@ jQuery(function () {
     if (
         edition ||
         autocompleteAuthor || addRowButton || roles || identifiers || classifications ||
-        autocompleteLanguage || autocompleteWorks || excerpts || links
+        autocompleteLanguage || autocompleteWorks || autocompleteSubjects || excerpts || links
     ) {
         import(/* webpackChunkName: "user-website" */ './edit')
             .then(module => {
