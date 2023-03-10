@@ -81,7 +81,7 @@ class trending_books_api(delegate.page):
             limit=int(i.limit),
             page=int(i.page),
             books_only=True,
-            sort_by_count=not i.sort_by_count == 'false',
+            sort_by_count=i.sort_by_count != "false",
             minimum=i.minimum,
         )
         result = {
@@ -275,12 +275,7 @@ class work_bookshelves(delegate.page):
     def GET(self, work_id):
         from openlibrary.core.models import Bookshelves
 
-        result = {'counts': {}}
-        counts = Bookshelves.get_num_users_by_bookshelf_by_work_id(work_id)
-        for (shelf_name, shelf_id) in Bookshelves.PRESET_BOOKSHELVES_JSON.items():
-            result['counts'][shelf_name] = counts.get(shelf_id, 0)
-
-        return json.dumps(result)
+        return json.dumps({'counts': Bookshelves.get_work_summary(work_id)})
 
     def POST(self, work_id):
         """
