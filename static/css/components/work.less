@@ -5,11 +5,6 @@
 @sidebar-width-with-margin: 60px + @sidebar-width;
 @test-body-mobile-width: 1060px;
 
-// allows smooth scrolling after clicking on book page jump links
-html {
-  scroll-behavior: smooth;
-}
-
 /* stylelint-disable no-descending-specificity */
 .workDetails {
   padding: 20px 0;
@@ -24,6 +19,8 @@ html {
   padding-right: 1.5em;
   .cover-animation {
     transition: transform .8s, opacity .8s;
+    position: relative;
+    z-index: @z-index-level-negative;
   }
   .cover-animation:hover {
     transform: perspective(465px) rotateX(0deg) rotateY(-10deg);

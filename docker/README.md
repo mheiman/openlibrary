@@ -155,7 +155,7 @@ For changes to the frontend (JS, CSS, and HTML/[Templetor](http://webpy.org/docs
 
 Other changes:
 - **Editing pip packages?** Rebuild the `home` service: `docker compose build home`
-- **Editing npm packages?** Run `docker compose run --rm home npm install` (see [#2032](https://github.com/internetarchive/openlibrary/issues/2032) for why)
+- **Editing npm packages?** Run `docker compose run --rm home npm install --no-audit` (see [#2032](https://github.com/internetarchive/openlibrary/issues/2032) for why)
 - **Editing core dependencies?** You will most likely need to do a full rebuild. This shouldn't happen too frequently. If you are making this sort of change, you will know exactly what you are doing ;) See [Developing the Dockerfile](#developing-the-dockerfile).
 
 ## Useful Runtime Commands
@@ -175,7 +175,7 @@ docker compose run --rm home make test
 
 # Install Node.js modules (if you get an error running tests)
 # Important: npm jobs need to be run inside the Docker environment.
-docker compose run --rm home npm install
+docker compose run --rm home npm install --no-audit
 # build JS/CSS assets:
 docker compose run --rm home npm run build-assets
 ```
@@ -188,9 +188,9 @@ Been away for a while? Are you getting strange errors you weren't getting before
 # Stop the site
 docker compose down
 
-# Build the latest oldev image, whilst also pulling the latest olbase image from docker hub
-# (Takes a while; ~20min for me)
-docker compose build --pull
+# Build the latest oldev image, without cache, whilst also pulling the latest olbase image from docker hub.
+# This can take from a few minutes to more than 20 on older hardware.
+docker compose build --pull --no-cache
 
 # Remove any old containers; if you use docker for something special, and have containers you don't want to lose, be careful with this. But you likely don't :)
 docker container prune
