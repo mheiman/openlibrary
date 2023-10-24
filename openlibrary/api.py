@@ -23,7 +23,6 @@ import json
 import web
 import logging
 import requests
-import six
 from configparser import ConfigParser
 
 logger = logging.getLogger("openlibrary.api")
@@ -97,7 +96,7 @@ class OpenLibrary:
         """Login to Open Library with given credentials."""
         headers = {'Content-Type': 'application/json'}
         try:
-            data = json.dumps(dict(username=username, password=password))
+            data = json.dumps({"username": username, "password": password})
             response = self._request(
                 '/account/login', method='POST', data=data, headers=headers
             )
@@ -113,8 +112,7 @@ class OpenLibrary:
         return unmarshal(response.json())
 
     def get_many(self, keys):
-        """Get multiple documents in a single request as a dictionary.
-        """
+        """Get multiple documents in a single request as a dictionary."""
         if len(keys) > 100:
             # Process in batches to avoid crossing the URL length limit.
             d = {}
@@ -195,19 +193,22 @@ class OpenLibrary:
                     break
                 q['offset'] += len(result)
 
-        if 'limit' in q and q['limit'] == False:
+        if 'limit' in q and q['limit'] is False:
             return unlimited_query(q)
         else:
-            response = self._request("/query.json", params=dict(query=json.dumps(q)))
+            response = self._request("/query.json", params={"query": json.dumps(q)})
             return unmarshal(response.json())
 
-    def search(self, query, limit=10, offset=0, fields: list[str] = None):
-        return self._request('/search.json', params={
-            'q': query,
-            'limit': limit,
-            'offset': offset,
-            **({'fields': ','.join(fields)} if fields else {})
-        }).json()
+    def search(self, query, limit=10, offset=0, fields: list[str] | None = None):
+        return self._request(
+            '/search.json',
+            params={
+                'q': query,
+                'limit': limit,
+                'offset': offset,
+                **({'fields': ','.join(fields)} if fields else {}),
+            },
+        ).json()
 
     def import_ocaid(self, ocaid, require_marc=True):
         data = {
@@ -281,10 +282,14 @@ def parse_datetime(value):
 
 
 class Text(str):
+    __slots__ = ()
+
     def __repr__(self):
         return "<text: %s>" % str.__repr__(self)
 
 
 class Reference(str):
+    __slots__ = ()
+
     def __repr__(self):
         return "<ref: %s>" % str.__repr__(self)

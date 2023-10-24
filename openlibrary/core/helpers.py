@@ -2,7 +2,7 @@
 """
 import json
 import re
-from datetime import datetime
+from datetime import datetime, date
 from urllib.parse import urlsplit
 
 import web
@@ -29,9 +29,6 @@ from infogami.infobase.client import Nothing
 # handy utility to parse ISO date strings
 from infogami.infobase.utils import parse_datetime
 from infogami.utils.view import safeint
-
-# TODO: i18n should be moved to core or infogami
-from openlibrary.i18n import gettext as _  # noqa: F401
 
 __all__ = [
     "sanitize",
@@ -73,9 +70,8 @@ def sanitize(html, encoding='utf8'):
 
     def get_nofollow(name, event):
         attrs = event[1][1]
-        href = attrs.get('href', '')
 
-        if href:
+        if href := attrs.get('href', ''):
             # add rel=nofollow to all absolute links
             _, host, _, _, _ = urlsplit(href)
             if host:
@@ -116,6 +112,8 @@ class NothingEncoder(json.JSONEncoder):
         """
         if isinstance(obj, Nothing):
             return None
+        if isinstance(obj, date):
+            return obj.isoformat()
         return super().default(obj)
 
 
@@ -188,8 +186,7 @@ def sprintf(s, *a, **kw):
     >>> sprintf('hello %(name)s', name='python')
     'hello python'
     """
-    args = kw or a
-    if args:
+    if args := kw or a:
         return s % args
     else:
         return s
@@ -200,18 +197,15 @@ def cond(pred, true_value, false_value=""):
 
     Hanly to use instead of if-else expression.
     """
-    if pred:
-        return true_value
-    else:
-        return false_value
+    return true_value if pred else false_value
 
 
 def commify(number, lang=None):
     """localized version of web.commify"""
     try:
         lang = lang or web.ctx.get("lang") or "en"
-        return babel.numbers.format_number(int(number), lang)
-    except:
+        return babel.numbers.format_decimal(int(number), locale=lang)
+    except Exception:
         return str(number)
 
 

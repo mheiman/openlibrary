@@ -1,7 +1,6 @@
 """Helper functions used by the List model.
 """
 from functools import cached_property
-from typing import Union
 
 import web
 import logging
@@ -14,6 +13,7 @@ from openlibrary.core import helpers as h
 from openlibrary.core import cache
 
 from openlibrary.plugins.worksearch.search import get_solr
+import contextlib
 
 logger = logging.getLogger("openlibrary.lists.model")
 
@@ -66,11 +66,13 @@ class ListMixin:
 
     def get_book_keys(self, offset=0, limit=50):
         offset = offset or 0
-        return list({
-            (seed.works[0].key if seed.works else seed.key)
-            for seed in self.seeds
-            if seed.key.startswith(('/books', '/works'))
-        })[offset : offset + limit]
+        return list(
+            {
+                (seed.works[0].key if seed.works else seed.key)
+                for seed in self.seeds
+                if seed.key.startswith(('/books', '/works'))
+            }
+        )[offset : offset + limit]
 
     def get_editions(self, limit=50, offset=0, _raw=False):
         """Returns the editions objects belonged to this list ordered by last_modified.
@@ -136,7 +138,7 @@ class ListMixin:
             for k in doc['edition_key']:
                 yield "/books/" + k
 
-    def get_export_list(self)  -> dict[str, list]:
+    def get_export_list(self) -> dict[str, list]:
         """Returns all the editions, works and authors of this list in arbitrary order.
 
         The return value is an iterator over all the entries. Each entry is a dictionary.
@@ -147,23 +149,29 @@ class ListMixin:
 
         # Separate by type each of the keys
         edition_keys = {
-            seed.key for seed in self.seeds if seed and seed.type.key == '/type/edition'
+            seed.key for seed in self.seeds if seed and seed.type.key == '/type/edition'  # type: ignore[attr-defined]
         }
         work_keys = {
-            "/works/%s" % seed.key.split("/")[-1] for seed in self.seeds if seed and seed.type.key == '/type/work'
+            "/works/%s" % seed.key.split("/")[-1] for seed in self.seeds if seed and seed.type.key == '/type/work'  # type: ignore[attr-defined]
         }
         author_keys = {
-            "/authors/%s" % seed.key.split("/")[-1] for seed in self.seeds if seed and seed.type.key == '/type/author'
+            "/authors/%s" % seed.key.split("/")[-1] for seed in self.seeds if seed and seed.type.key == '/type/author'  # type: ignore[attr-defined]
         }
 
         # Create the return dictionary
         export_list = {}
         if edition_keys:
-            export_list["editions"] = [doc.dict() for doc in web.ctx.site.get_many(list(edition_keys))]
+            export_list["editions"] = [
+                doc.dict() for doc in web.ctx.site.get_many(list(edition_keys))
+            ]
         if work_keys:
-            export_list["works"] = [doc.dict() for doc in web.ctx.site.get_many(list(work_keys))]
+            export_list["works"] = [
+                doc.dict() for doc in web.ctx.site.get_many(list(work_keys))
+            ]
         if author_keys:
-            export_list["authors"] = [doc.dict() for doc in web.ctx.site.get_many(list(author_keys))]
+            export_list["authors"] = [
+                doc.dict() for doc in web.ctx.site.get_many(list(author_keys))
+            ]
 
         return export_list
 
@@ -197,12 +205,10 @@ class ListMixin:
         """
         for e in editions:
             if "recent_changeset" not in e:
-                try:
+                with contextlib.suppress(IndexError):
                     e['recent_changeset'] = self._site.recentchanges(
                         {"key": e.key, "limit": 1}
                     )[0]
-                except IndexError:
-                    pass
 
     def _get_solr_query_for_subjects(self):
         terms = [seed.get_solr_query_term() for seed in self.get_seeds()]
@@ -214,7 +220,7 @@ class ListMixin:
 
         # Solr has a maxBooleanClauses constraint there too many seeds, the
         if len(self.seeds) > 500:
-            logger.warn(
+            logger.warning(
                 "More than 500 seeds. skipping solr query for finding subjects."
             )
             return []
@@ -326,7 +332,7 @@ class Seed:
         * cover
     """
 
-    def __init__(self, list, value: Union[web.storage, str]):
+    def __init__(self, list, value: web.storage | str):
         self._list = list
         self._type = None
 
@@ -366,21 +372,13 @@ class Seed:
                 return None
 
     @cached_property
-    def type(self):
+    def type(self) -> str:
         if self._type:
             return self._type
-        type = self.document.type.key
-
-        if type == "/type/edition":
-            return "edition"
-        elif type == "/type/work":
-            return "work"
-        elif type == "/type/author":
-            return "author"
-        elif type == "/type/redirect":
-            return "redirect"
-        else:
-            return "unknown"
+        key = self.document.type.key
+        if key in ("/type/author", "/type/edition", "/type/redirect", "/type/work"):
+            return key.split("/")[-1]
+        return "unknown"
 
     @property
     def title(self):
@@ -438,8 +436,7 @@ class Seed:
             "title": self.title,
             "last_update": self.last_update and self.last_update.isoformat() or None,
         }
-        cover = self.get_cover()
-        if cover:
+        if cover := self.get_cover():
             d['picture'] = {"url": cover.url("S")}
         return d
 

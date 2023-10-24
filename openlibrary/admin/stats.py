@@ -65,6 +65,9 @@ def store_data(data, date):
     doc = web.ctx.site.store.get(uid) or {}
     doc.update(data)
     doc['type'] = 'admin-stats'
+    # as per https://github.com/internetarchive/infogami/blob/master/infogami/infobase/_dbstore/store.py#L79-L83
+    # avoid document collisions if multiple tasks updating stats in competition (race)
+    doc["_rev"] = None
     web.ctx.site.store[uid] = doc
 
 
@@ -109,7 +112,7 @@ def setup_ol_config(openlibrary_config_file):
     config.site = "openlibrary.org"
 
     infogami.load_config(openlibrary_config_file)
-    infogami.config.infobase_parameters = dict(type="ol")
+    infogami.config.infobase_parameters = {"type": "ol"}
 
     if config.get("infobase_config_file"):
         dir = os.path.dirname(openlibrary_config_file)
@@ -185,7 +188,4 @@ def main(infobase_config, openlibrary_config, coverstore_config, ndays=1):
         store_data(data, start.strftime("%Y-%m-%d"))
         end = start
         start = end - datetime.timedelta(days=1)
-    if numbers.sqlitefile:
-        logger.info("Removing sqlite file used for ipstats")
-        os.unlink(numbers.sqlitefile)
     return 0

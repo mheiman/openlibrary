@@ -1,8 +1,13 @@
 @import (less) "base/dl.less";
+@import (less) "components/nav-bar.less";
+
+@sidebar-width: 225px;
+@sidebar-width-with-margin: 60px + @sidebar-width;
+@test-body-mobile-width: 1060px;
 
 /* stylelint-disable no-descending-specificity */
 .workDetails {
-  padding: 20px 0;
+  padding: 0 0 20px;
   .book-description {
     text-align: justify;
   }
@@ -11,9 +16,11 @@
 // Left (editionCover)
 .editionCover {
   min-height: 10px;
-  padding-right: 1.5em;
+  padding-right: 0;
   .cover-animation {
     transition: transform .8s, opacity .8s;
+    position: relative;
+    z-index: @z-index-level-negative;
   }
   .cover-animation:hover {
     transform: perspective(465px) rotateX(0deg) rotateY(-10deg);
@@ -24,6 +31,7 @@
 @import (less) "components/illustration.less";
 @import (less) "components/rating-form.less";
 @import (less) "components/dropper.less";
+@import (less) "components/mybooks-dropper.less";
 @import (less) "components/listLists.less";
 
 // Center (editionAbout)
@@ -33,6 +41,10 @@ div.editionAbout {
   p {
     margin: 1em 0;
     font-size: 13px;
+  }
+  p.book-description {
+    margin: 0;
+    text-align: left;
   }
 
   p:first-child {
@@ -44,15 +56,6 @@ div.editionAbout {
   }
 }
 
-.work-title{
-  margin-top: 5px;
-  margin-bottom: 0;
-}
-
-.work-subtitle{
-  margin-top: 0;
-}
-
 .work-description{
   pre {
     overflow: auto;
@@ -60,6 +63,21 @@ div.editionAbout {
 }
 
 .workFooter {
+  .lists-heading {
+    display: flex;
+    /* stylelint-disable selector-max-specificity */
+    h2.lists-title {
+      flex: 1;
+      margin-top: 5px;
+      margin-bottom: 14px;
+      font-size: 1.375em;
+    }
+    a {
+      color: @link-blue;
+      font-size: 16px;
+    }
+    /* stylelint-enable selector-max-specificity */
+  }
   ul.listLists {
     display: flex;
   }
@@ -119,15 +137,6 @@ h3.edition-header {
   margin: 0;
 }
 
-h2.edition-byline {
-  margin: 7px 2px 20px;
-}
-
-.first-published-date {
-  color: @grey;
-  font-size: .8em;
-}
-
 .edition-overview {
   background: @light-grey;
   padding: 10px;
@@ -146,55 +155,14 @@ h2.edition-byline {
   color: @grey;
 }
 
-.work-menu {
-  border-bottom: 1px solid @lighter-grey;
-  padding-bottom: 5px;
-  font-weight: bold;
-  margin-top: 20px;
-
-  &.sticky {
-    position: sticky;
-    top: 50px;
-    display: block;
-    background: @white;
-    z-index: @z-index-level-3;
-    padding-top: 10px;
-  }
-}
-
-@media only screen and (min-width: @width-breakpoint-tablet) {
-  .work-menu.sticky {
-    top: 0;
-  }
-}
-
-.work-menu li {
-  display: inline;
-  padding: 0 15px;
-  padding-bottom: 5px;
-  font-size: 13px;
-}
-
-.work-menu li a {
-  text-decoration: none;
-  color: @grey;
-}
-
-.work-menu li.selected {
-  border-bottom: 2px solid @link-blue;
-}
-
-.work-menu li:hover {
-  border-bottom: 2px solid @link-blue;
-}
-
-.work-menu li.selected a {
-  color: @link-blue;
-}
-
 a.section-anchor {
+  scroll-margin-top: 70px;
   height: 20px;
   display: block;
+
+  &--no-height {
+    height: 0;
+  }
 }
 
 .book-overview {
@@ -232,10 +200,11 @@ div.editionTools {
 @media only screen and (min-width: @width-breakpoint-desktop) {
   .workDetails {
     display: flex;
+    padding: 20px 0;
   }
   div.edition {
     &Cover {
-      width: 225px;
+      width: @sidebar-width;
       margin-right: 1.5em;
       margin-bottom: 0;
     }
@@ -270,20 +239,35 @@ div.editionTools {
 
 .edition-omniline {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   padding: 10px;
-  border-bottom: 1px solid @lighter-grey;
   margin-bottom: 10px;
-  background: @grey-fafafa;
+  overflow-x: auto;
 
   &-item {
     display: flex;
-    justify-content: space-between;
+    flex-direction: column;
+    justify-content: top;
+    align-items: center;
     flex: 1;
+    padding: 9px;
+    margin: 0 4px;
+    border: 1px solid @lighter-grey;
+    border-radius: 5px;
     font-size: .8em;
+    word-break: break-word;
+    text-align: center;
+    min-width: 100px;
 
     div {
-      font-weight: bold;
+      margin-bottom: 4px;
+      font-size: .9em;
+      color: @grey;
+      word-wrap: break-word;
+    }
+
+    a {
+      text-decoration: none;
     }
   }
 
@@ -300,12 +284,12 @@ div.editionTools {
   .edition-omniline {
     flex-direction: row;
     justify-content: space-between;
-    overflow-x: auto;
 
     &-item {
       flex-direction: column;
       justify-content: flex-start;
       align-items: center;
+
     }
   }
 }
@@ -322,14 +306,6 @@ div.editionTools {
   color: @grey;
 }
 
-.work-line {
-  font-style: oblique;
-  color: @grey;
-  a {
-    color: @grey;
-  }
-}
-
 .loadingIndicator {
   display: flex;
   justify-content: center;
@@ -341,3 +317,19 @@ div.editionTools {
   font-weight: normal;
   color: @link-blue;
 }
+@media only screen and (max-width: @width-breakpoint-desktop){
+  div.editionAbout {
+    /* stylelint-disable selector-max-specificity */
+    .book-description.read-more,
+    .book-description.read-less {
+      text-align: center;
+    }
+    .book-description {
+      padding-top: 1em;
+    }
+    /* stylelint-enable selector-max-specificity */
+  }
+}
+
+@import (less) "components/check-in.less";
+@import (less) "components/work-title-and-author.less";

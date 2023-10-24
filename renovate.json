@@ -10,20 +10,20 @@
   },
   "packageRules": [
     {
-      "matchPackageNames": ["eslint", "babel-eslint", "eslint-plugin-no-jquery", "eslint-plugin-vue"],
+      "matchPackageNames": ["eslint", "@babel/eslint-parser", "eslint-plugin-no-jquery", "eslint-plugin-vue"],
       "groupName": "eslint",
       "automerge": true
     },
     {
-      "matchPackageNames": ["jest", "bundlesize", "sinon", "stylelint", "stylelint-declaration-use-variable"],
+      "matchPackageNames": ["jest", "bundlesize", "sinon", "stylelint", "stylelint-declaration-strict-value"],
       "automerge": true
     },
     {
-      "matchPackageNames": ["flake8", "mypy", "pytest", "safety"],
+      "matchPackageNames": ["mypy", "pytest", "pytest-asyncio", "ruff", "safety"],
       "automerge": true
     },
     {
-      "matchDatasources": ["github-actions"],
+      "matchPackagePatterns": ["^actions/"],
       "automerge": true
     }
   ]

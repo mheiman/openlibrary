@@ -7,7 +7,7 @@ import web
 from infogami.utils.view import render
 from openlibrary.core import helpers as h
 
-from six.moves import urllib
+import urllib
 
 logger = logging.getLogger("openlibrary.readableurls")
 
@@ -41,9 +41,8 @@ class ReadableUrlProcessor:
         if web.ctx.path.startswith("/l/"):
             raise web.seeother("/languages/" + web.ctx.path[len("/l/") :])
 
-        if web.ctx.path.startswith("/user/"):
-            if not web.ctx.site.get(web.ctx.path):
-                raise web.seeother("/people/" + web.ctx.path[len("/user/") :])
+        if web.ctx.path.startswith("/user/") and not web.ctx.site.get(web.ctx.path):
+            raise web.seeother("/people/" + web.ctx.path[len("/user/") :])
 
         real_path, readable_path = get_readable_path(
             web.ctx.site, web.ctx.path, self.patterns, encoding=web.ctx.encoding

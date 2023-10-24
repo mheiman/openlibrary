@@ -1,14 +1,19 @@
 import array
 import datetime
+import io
 import json
 import logging
 import os
 
-import memcache
 import requests
+
 import web
 
-from openlibrary.coverstore import config, db, ratelimit
+from PIL import Image, ImageDraw, ImageFont
+import textwrap
+
+
+from openlibrary.coverstore import config, db
 from openlibrary.coverstore.coverlib import read_file, read_image, save_image
 from openlibrary.coverstore.utils import (
     changequery,
@@ -64,7 +69,7 @@ def get_cover_id(olkeys):
 
 def _query(category, key, value):
     if key == 'olid':
-        prefixes = dict(a="/authors/", b="/books/", w="/works/")
+        prefixes = {"a": "/authors/", "b": "/books/", "w": "/works/"}
         if category in prefixes:
             olkey = prefixes[category] + value
             return get_cover_id([olkey])
@@ -87,7 +92,11 @@ ERROR_BAD_IMAGE = 3, "Invalid Image"
 
 class index:
     def GET(self):
-        return '<h1>Open Library Book Covers Repository</h1><div>See <a href="https://openlibrary.org/dev/docs/api/covers">Open Library Covers API</a> for details.</div>'
+        return (
+            '<h1>Open Library Book Covers Repository</h1><div>See <a '
+            'href="https://openlibrary.org/dev/docs/api/covers">Open Library Covers '
+            'API</a> for details.</div>'
+        )
 
 
 def _cleanup():
@@ -200,15 +209,6 @@ def trim_microsecond(date):
     return datetime.datetime(*date.timetuple()[:6])
 
 
-def zipview_url(item, zipfile, filename):
-    # http or https
-    protocol = web.ctx.protocol
-    return (
-        "%(protocol)s://archive.org/download/%(item)s/%(zipfile)s/%(filename)s"
-        % locals()
-    )
-
-
 # Number of images stored in one archive.org item
 IMAGES_PER_ITEM = 10000
 
@@ -219,7 +219,8 @@ def zipview_url_from_id(coverid, size):
     itemid = "olcovers%d" % item_index
     zipfile = itemid + suffix + ".zip"
     filename = "%d%s.jpg" % (coverid, suffix)
-    return zipview_url(itemid, zipfile, filename)
+    protocol = web.ctx.protocol  # http or https
+    return f"{protocol}://archive.org/download/{itemid}/{zipfile}/{filename}"
 
 
 class cover:
@@ -246,24 +247,13 @@ class cover:
             size_part = size and ("-" + size) or ""
             url = f"/{category}/id/{id}{size_part}.jpg"
 
-            query = web.ctx.env.get('QUERY_STRING')
-            if query:
+            if query := web.ctx.env.get('QUERY_STRING'):
                 url += '?' + query
             raise web.found(url)
 
         if key == 'isbn':
             value = value.replace("-", "").strip()  # strip hyphens from ISBN
-            # Disabling ratelimit as iptables is taking care of botnets.
-            # value = self.ratelimit_query(category, key, value)
             value = self.query(category, key, value)
-
-            # Redirect isbn requests to archive.org.
-            # This will heavily reduce the load on coverstore server.
-            # The max_coveritem_index config parameter specifies the latest
-            # olcovers items uploaded to archive.org.
-            if value and self.is_cover_in_cluster(value):
-                url = zipview_url_from_id(int(value), size)
-                raise web.found(url)
         elif key == 'ia':
             url = self.get_ia_cover_url(value, size)
             if url:
@@ -273,15 +263,27 @@ class cover:
         elif key != 'id':
             value = self.query(category, key, value)
 
-        if value and safeint(value) in config.blocked_covers:
-            raise web.notfound()
+        if not value or (value and safeint(value) in config.blocked_covers):
+            return notfound()
 
         # redirect to archive.org cluster for large size and original images whenever possible
-        if value and (size == "L" or size == "") and self.is_cover_in_cluster(value):
+        if size in ("L", "") and self.is_cover_in_cluster(value):
             url = zipview_url_from_id(int(value), size)
             raise web.found(url)
 
-        d = value and self.get_details(value, size.lower())
+        # covers_0008 batches [_00, _82] are tar'd / zip'd in archive.org items
+        if isinstance(value, int) or value.isnumeric():  # noqa: SIM102
+            if 8_820_000 > int(value) >= 8_000_000:
+                prefix = f"{size.lower()}_" if size else ""
+                pid = "%010d" % int(value)
+                item_id = f"{prefix}covers_{pid[:4]}"
+                item_tar = f"{prefix}covers_{pid[:4]}_{pid[4:6]}.tar"
+                item_file = f"{pid}{'-' + size.upper() if size else ''}"
+                path = f"{item_id}/{item_tar}/{item_file}.jpg"
+                protocol = web.ctx.protocol
+                raise web.found(f"{protocol}://archive.org/download/{path}")
+
+        d = self.get_details(value, size.lower())
         if not d:
             return notfound()
 
@@ -292,17 +294,23 @@ class cover:
                 raise web.notmodified()
 
             web.header('Cache-Control', 'public')
-            web.expires(
-                100 * 365 * 24 * 3600
-            )  # this image is not going to expire in next 100 years.
+            # this image is not going to expire in next 100 years.
+            web.expires(100 * 365 * 24 * 3600)
         else:
             web.header('Cache-Control', 'public')
-            web.expires(
-                10 * 60
-            )  # Allow the client to cache the image for 10 mins to avoid further requests
+            # Allow the client to cache the image for 10 mins to avoid further requests
+            web.expires(10 * 60)
 
         web.header('Content-Type', 'image/jpeg')
         try:
+            from openlibrary.coverstore import archive
+
+            if d.id >= 8_820_000 and d.uploaded and '.zip' in d.filename:
+                raise web.found(
+                    archive.Cover.get_cover_url(
+                        d.id, size=size, protocol=web.ctx.protocol
+                    )
+                )
             return read_image(d, size)
         except OSError:
             raise web.notfound()
@@ -317,7 +325,7 @@ class cover:
         # Not a text item or no images or scan is not complete yet
         if (
             d.get("mediatype") != "texts"
-            or d.get("repub_state", "4") not in ["4", "6"]
+            or d.get("repub_state", "4") not in ("4", "6")
             or "imagecount" not in d
         ):
             return
@@ -379,8 +387,6 @@ class cover:
 
     def query(self, category, key, value):
         return _query(category, key, value)
-
-    ratelimit_query = ratelimit.ratelimit()(query)
 
 
 @web.memoize
@@ -512,3 +518,95 @@ class delete:
                 return 'cover has been deleted successfully.'
         else:
             return 'no such id: %s' % id
+
+
+def render_list_preview_image(lst_key):
+    """This function takes a list of five books and puts their covers in the correct
+    locations to create a new image for social-card"""
+    lst = web.ctx.site.get(lst_key)
+    five_seeds = lst.seeds[0:5]
+    background = Image.open(
+        "/openlibrary/static/images/Twitter_Social_Card_Background.png"
+    )
+
+    logo = Image.open("/openlibrary/static/images/Open_Library_logo.png")
+
+    W, H = background.size
+    image = []
+    for seed in five_seeds:
+        cover = seed.get_cover()
+
+        if cover:
+            response = requests.get(
+                f"https://covers.openlibrary.org/b/id/{cover.id}-M.jpg"
+            )
+            image_bytes = io.BytesIO(response.content)
+
+            img = Image.open(image_bytes)
+
+            basewidth = 162
+            wpercent = basewidth / float(img.size[0])
+            hsize = int(float(img.size[1]) * float(wpercent))
+            img = img.resize((basewidth, hsize), Image.LANCZOS)
+            image.append(img)
+    max_height = 0
+    for img in image:
+        if img.size[1] > max_height:
+            max_height = img.size[1]
+    if len(image) == 5:
+        background.paste(image[0], (63, 174 + max_height - image[0].size[1]))
+        background.paste(image[1], (247, 174 + max_height - image[1].size[1]))
+        background.paste(image[2], (431, 174 + max_height - image[2].size[1]))
+        background.paste(image[3], (615, 174 + max_height - image[3].size[1]))
+        background.paste(image[4], (799, 174 + max_height - image[4].size[1]))
+
+    elif len(image) == 4:
+        background.paste(image[0], (155, 174 + max_height - image[0].size[1]))
+        background.paste(image[1], (339, 174 + max_height - image[1].size[1]))
+        background.paste(image[2], (523, 174 + max_height - image[2].size[1]))
+        background.paste(image[3], (707, 174 + max_height - image[3].size[1]))
+
+    elif len(image) == 3:
+        background.paste(image[0], (247, 174 + max_height - image[0].size[1]))
+        background.paste(image[1], (431, 174 + max_height - image[1].size[1]))
+        background.paste(image[2], (615, 174 + max_height - image[2].size[1]))
+
+    elif len(image) == 2:
+        background.paste(image[0], (339, 174 + max_height - image[0].size[1]))
+        background.paste(image[1], (523, 174 + max_height - image[1].size[1]))
+
+    else:
+        background.paste(image[0], (431, 174 + max_height - image[0].size[1]))
+
+    logo = logo.resize((120, 74), Image.LANCZOS)
+    background.paste(logo, (880, 14), logo)
+
+    draw = ImageDraw.Draw(background)
+    font_author = ImageFont.truetype(
+        "/openlibrary/static/fonts/NotoSans-LightItalic.ttf", 22
+    )
+    font_title = ImageFont.truetype(
+        "/openlibrary/static/fonts/NotoSans-SemiBold.ttf", 28
+    )
+
+    para = textwrap.wrap(lst.name, width=45)
+    current_h = 42
+
+    author_text = "A list on Open Library"
+    if owner := lst.get_owner():
+        author_text = f"A list by {owner.displayname}"
+
+    left, top, right, bottom = font_author.getbbox(author_text)
+    w, h = right - left, bottom - top
+    draw.text(((W - w) / 2, current_h), author_text, font=font_author, fill=(0, 0, 0))
+    current_h += h + 5
+
+    for line in para:
+        left, top, right, bottom = font_title.getbbox(line)
+        w, h = right - left, bottom - top
+        draw.text(((W - w) / 2, current_h), line, font=font_title, fill=(0, 0, 0))
+        current_h += h
+
+    with io.BytesIO() as buf:
+        background.save(buf, format='PNG')
+        return buf.getvalue()

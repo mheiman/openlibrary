@@ -44,15 +44,15 @@ $def with (stats)
       <tbody>
         <tr>
           <th>$_('All time')</th>
-          <td>$stats['total_books_starred']['total']['count']</td>
+          <td>$stats['total_books_starred']['total']</td>
         </tr>
         <tr>
           <th>$_('This Month')</th>
-          <td>$stats['total_books_starred']['month']['count']</td>
+          <td>$stats['total_books_starred']['month']</td>
         </tr>
         <tr>
           <th>$_('Total # Unique Raters (all time)')</th>
-          <td>$stats['total_books_starred']['unique']['count']</td>
+          <td>$stats['total_star_raters']['total']</td>
         </tr>
       </tbody>
     </table>
@@ -64,7 +64,7 @@ $def with (stats)
     <div class="mybooks-list">
      <ul class="list-books">
         $for book in stats['leaderboard']['most_wanted_month']:
-            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added 1 time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
+            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added %(count)d time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
       </ul>
     </div>
 
@@ -72,7 +72,7 @@ $def with (stats)
     <div class="mybooks-list">
       <ul class="list-books">
         $for book in stats['leaderboard']['most_wanted_all']:
-            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added 1 time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
+            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added %(count)d time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
       </ul>
     </div>
 
@@ -81,7 +81,7 @@ $def with (stats)
     <div class="mybooks-list">
       <ul class="list-books">
         $for book in stats['leaderboard']['most_read']:
-            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added 1 time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
+            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added %(count)d time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
       </ul>
     </div>
 
@@ -90,7 +90,7 @@ $def with (stats)
     <div class="mybooks-list">
       <ul class="list-books">
         $for book in stats['leaderboard']['most_rated_all']:
-            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added 1 time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
+            $:macros.SearchResultsWork(book['work'], decorations=ungettext("Added %(count)d time", "Added %(count)d times", book['cnt'], count=book['cnt']), availability=book.get('availability'))
       </ul>
     </div>
   </div>

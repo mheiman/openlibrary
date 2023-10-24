@@ -1,14 +1,14 @@
 """Handlers for borrowing books"""
 
 import copy
-import datetime
-import time
 import hashlib
 import hmac
-import re
-import requests
 import json
 import logging
+import re
+import requests
+import time
+from datetime import datetime
 
 import web
 
@@ -27,12 +27,12 @@ from openlibrary.utils import dateutil
 
 from lxml import etree
 
-from six.moves import urllib
+import urllib
 
 
 logger = logging.getLogger("openlibrary.borrow")
 
-########## Constants
+# ######### Constants
 
 lending_library_subject = 'Lending library'
 in_library_subject = 'In library'
@@ -63,17 +63,18 @@ READER_AUTH_SECONDS = dateutil.MINUTE_SECS * 2
 
 # Base URL for BookReader
 try:
-    bookreader_host = config.bookreader_host
+    bookreader_host = config.bookreader_host  # type: ignore[attr-defined]
 except AttributeError:
     bookreader_host = 'archive.org'
 
-bookreader_stream_base = 'https://' + bookreader_host + '/stream'
+bookreader_stream_base = f'https://{bookreader_host}/stream'
 
-########## Page Handlers
+
+# ######### Page Handlers
+
 
 # Handler for /books/{bookid}/{title}/borrow
 class checkout_with_ocaid(delegate.page):
-
     path = "/borrow/ia/(.*)"
 
     def GET(self, ocaid):
@@ -83,6 +84,8 @@ class checkout_with_ocaid(delegate.page):
         i = web.input()
         params = urllib.parse.urlencode(i)
         ia_edition = web.ctx.site.get('/books/ia:%s' % ocaid)
+        if not ia_edition:
+            raise web.notfound()
         edition = web.ctx.site.get(ia_edition.location)
         url = '%s/x/borrow' % edition.key
         raise web.seeother(url + '?' + params)
@@ -93,6 +96,8 @@ class checkout_with_ocaid(delegate.page):
         endpoint with this OL identifier.
         """
         ia_edition = web.ctx.site.get('/books/ia:%s' % ocaid)
+        if not ia_edition:
+            raise web.notfound()
         borrow().POST(ia_edition.location)
 
 
@@ -107,7 +112,12 @@ class borrow(delegate.page):
         """Called when the user wants to borrow the edition"""
 
         i = web.input(
-            action='borrow', format=None, ol_host=None, _autoReadAloud=None, q=""
+            action='borrow',
+            format=None,
+            ol_host=None,
+            _autoReadAloud=None,
+            q="",
+            redirect="",
         )
 
         ol_host = i.ol_host or 'openlibrary.org'
@@ -132,7 +142,7 @@ class borrow(delegate.page):
             raise web.seeother(archive_url)
 
         error_redirect = archive_url
-        edition_redirect = urllib.parse.quote(edition.url())
+        edition_redirect = urllib.parse.quote(i.redirect or edition.url())
         user = accounts.get_current_user()
 
         if user:
@@ -141,25 +151,25 @@ class borrow(delegate.page):
             s3_keys = web.ctx.site.store.get(account._key).get('s3_keys')
         if not user or not ia_itemname or not s3_keys:
             web.setcookie(config.login_cookie_name, "", expires=-1)
-            redirect_url = "/account/login?redirect={}/borrow?action={}".format(
-                edition_redirect, action
+            redirect_url = (
+                f"/account/login?redirect={edition_redirect}/borrow?action={action}"
             )
             if i._autoReadAloud is not None:
                 redirect_url += '&_autoReadAloud=' + i._autoReadAloud
             raise web.seeother(redirect_url)
 
         if action == 'return':
-            lending.s3_loan_api(edition.ocaid, s3_keys, action='return_loan')
+            lending.s3_loan_api(s3_keys, ocaid=edition.ocaid, action='return_loan')
             stats.increment('ol.loans.return')
             edition.update_loan_status()
             user.update_loan_status()
-            raise web.seeother('/account/loans')
+            raise web.seeother(edition_redirect)
         elif action == 'join-waitinglist':
-            lending.s3_loan_api(edition.ocaid, s3_keys, action='join_waitlist')
+            lending.s3_loan_api(s3_keys, ocaid=edition.ocaid, action='join_waitlist')
             stats.increment('ol.loans.joinWaitlist')
             raise web.redirect(edition_redirect)
         elif action == 'leave-waitinglist':
-            lending.s3_loan_api(edition.ocaid, s3_keys, action='leave_waitlist')
+            lending.s3_loan_api(s3_keys, ocaid=edition.ocaid, action='leave_waitlist')
             stats.increment('ol.loans.leaveWaitlist')
             raise web.redirect(edition_redirect)
 
@@ -174,12 +184,12 @@ class borrow(delegate.page):
         elif action in ('borrow', 'browse'):
             borrow_access = user_can_borrow_edition(user, edition)
 
-            if not (s3_keys or borrow_access):
+            if not (s3_keys and borrow_access):
                 stats.increment('ol.loans.outdatedAvailabilityStatus')
                 raise web.seeother(error_redirect)
 
             lending.s3_loan_api(
-                edition.ocaid, s3_keys, action='%s_book' % borrow_access
+                s3_keys, ocaid=edition.ocaid, action='%s_book' % borrow_access
             )
             stats.increment('ol.loans.bookreader')
             stats.increment('ol.loans.%s' % borrow_access)
@@ -239,7 +249,7 @@ class borrow_status(delegate.page):
             'id': key,
             'loan_available': loan_available,
             'available_formats': available_formats,
-            'lending_subjects': [lending_subject for lending_subject in subjects],
+            'lending_subjects': list(subjects),
         }
 
         output_text = json.dumps(output)
@@ -250,100 +260,6 @@ class borrow_status(delegate.page):
             output_text = f'{i.callback} ( {output_text} );'
 
         return delegate.RawText(output_text, content_type=content_type)
-
-
-class borrow_admin(delegate.page):
-    path = "(/books/.*)/borrow_admin"
-
-    def GET(self, key):
-        if not is_admin():
-            return render_template(
-                'permission_denied', web.ctx.path, "Permission denied."
-            )
-
-        edition = web.ctx.site.get(key)
-        if not edition:
-            raise web.notfound()
-
-        if edition.ocaid:
-            lending.sync_loan(edition.ocaid)
-            ebook_key = "ebooks/" + edition.ocaid
-            ebook = web.ctx.site.store.get(ebook_key) or {}
-        else:
-            ebook = None
-
-        edition_loans = get_edition_loans(edition)
-
-        user_loans = []
-        user = accounts.get_current_user()
-        if user:
-            user_loans = get_loans(user)
-
-        return render_template(
-            "borrow_admin", edition, edition_loans, ebook, user_loans, web.ctx.ip
-        )
-
-    def POST(self, key):
-        if not is_admin():
-            return render_template(
-                'permission_denied', web.ctx.path, "Permission denied."
-            )
-
-        edition = web.ctx.site.get(key)
-        if not edition:
-            raise web.notfound()
-        if not edition.ocaid:
-            raise web.seeother(edition.url("/borrow_admin"))
-
-        lending.sync_loan(edition.ocaid)
-        i = web.input(action=None, loan_key=None)
-
-        if i.action == 'delete' and i.loan_key:
-            loan = lending.get_loan(edition.ocaid)
-            if loan and loan['_key'] == i.loan_key:
-                loan.delete()
-        raise web.seeother(web.ctx.path + '/borrow_admin')
-
-
-class borrow_admin_no_update(delegate.page):
-    path = "(/books/.*)/borrow_admin_no_update"
-
-    def GET(self, key):
-        if not is_admin():
-            return render_template(
-                'permission_denied', web.ctx.path, "Permission denied."
-            )
-
-        edition = web.ctx.site.get(key)
-
-        if not edition:
-            raise web.notfound()
-
-        edition_loans = get_edition_loans(edition)
-
-        user_loans = []
-        user = accounts.get_current_user()
-        if user:
-            user_loans = get_loans(user)
-
-        return render_template(
-            "borrow_admin_no_update", edition, edition_loans, user_loans, web.ctx.ip
-        )
-
-    def POST(self, key):
-        if not is_admin():
-            return render_template(
-                'permission_denied', web.ctx.path, "Permission denied."
-            )
-
-        i = web.input(action=None, loan_key=None)
-
-        if i.action == 'delete' and i.loan_key:
-            delete_loan(i.loan_key)
-
-        raise web.seeother(
-            web.ctx.path
-        )  # $$$ why doesn't this redirect to borrow_admin_no_update?
 
 
 class ia_loan_status(delegate.page):
@@ -470,7 +386,7 @@ class ia_borrow_notify(delegate.page):
             waitinglist.on_waitinglist_update(identifier)
 
 
-########## Public Functions
+# ######### Public Functions
 
 
 @public
@@ -486,14 +402,12 @@ def is_loan_available(edition, type):
 @public
 def datetime_from_isoformat(expiry):
     """Returns datetime object, or None"""
-    if expiry is None:
-        return None
-    return parse_datetime(expiry)
+    return None if expiry is None else parse_datetime(expiry)
 
 
 @public
 def datetime_from_utc_timestamp(seconds):
-    return datetime.datetime.utcfromtimestamp(seconds)
+    return datetime.utcfromtimestamp(seconds)
 
 
 @public
@@ -522,7 +436,7 @@ def get_bookreader_host():
     return bookreader_host
 
 
-########## Helper Functions
+# ######### Helper Functions
 
 
 def get_all_store_values(**query):
@@ -665,20 +579,13 @@ def is_loaned_out(resource_id):
 
     # Find the loan and check if it has expired
     loan = web.ctx.site.store.get(loan_key)
-    if loan:
-        if datetime_from_isoformat(loan['expiry']) < datetime.datetime.utcnow():
-            return True
-
-    return False
+    return bool(loan and datetime_from_isoformat(loan['expiry']) < datetime.utcnow())
 
 
 def is_loaned_out_from_status(status):
-    if not status:
+    if not status or status['returned'] == 'T':
+        # Current loan has been returned
         return False
-    else:
-        if status['returned'] == 'T':
-            # Current loan has been returned
-            return False
 
     # Has status and not returned
     return True
@@ -703,7 +610,7 @@ def _update_loan_status(loan_key, loan, bss_status=None):
     if loan['resource_type'] == 'bookreader':
         # delete loan record if has expired
         # $$$ consolidate logic for checking expiry.  keep loan record for some time after it expires.
-        if loan['expiry'] and loan['expiry'] < datetime.datetime.utcnow().isoformat():
+        if loan['expiry'] and loan['expiry'] < datetime.utcnow().isoformat():
             logger.info("%s: loan expired. deleting...", loan_key)
             web.ctx.site.store.delete(loan_key)
         return
@@ -792,13 +699,16 @@ def user_can_borrow_edition(user, edition):
     book_is_waitlistable = lending_st.get('available_to_waitlist', False)
     user_is_below_loan_limit = user.get_loan_count() < user_max_loans
 
-    if book_is_lendable and user_is_below_loan_limit:
-        if lending_st.get('available_to_browse'):
-            return 'browse'
-        if lending_st.get('available_to_borrow') or (
-            book_is_waitlistable and is_users_turn_to_borrow(user, edition)
-        ):
+    if book_is_lendable:
+        if web.cookies().get('pd', False):
             return 'borrow'
+        elif user_is_below_loan_limit:
+            if lending_st.get('available_to_browse'):
+                return 'browse'
+            elif lending_st.get('available_to_borrow') or (
+                book_is_waitlistable and is_users_turn_to_borrow(user, edition)
+            ):
+                return 'borrow'
     return False
 
 
@@ -815,7 +725,7 @@ def is_users_turn_to_borrow(user, edition):
 
 
 def is_admin():
-    """ "Returns True if the current user is in admin usergroup."""
+    """Returns True if the current user is in admin usergroup."""
     user = accounts.get_current_user()
     return user and user.key in [
         m.key for m in web.ctx.site.get('/usergroup/admin').members
@@ -847,7 +757,7 @@ def get_ia_auth_dict(user, item_id, user_specified_loan_key, access_token):
     """Returns response similar to one of these:
     {'success':true,'token':'1287185207-fa72103dd21073add8f87a5ad8bce845','borrowed':true}
     {'success':false,'msg':'Book is checked out','borrowed':false, 'resolution': 'You can visit <a href="http://openlibary.org/ia/someid">this book\'s page on Open Library</a>.'}
-    """
+    """  # noqa: E501
 
     base_url = 'http://' + web.ctx.host
     resolution_dict = {'base_url': base_url, 'item_id': item_id}
@@ -871,23 +781,27 @@ def get_ia_auth_dict(user, item_id, user_specified_loan_key, access_token):
         # Book is not checked out as a BookReader loan - may still be checked out in ACS4
         error_message = 'Lending Library Book'
         resolution_message = (
-            'This book is part of the <a href="%(base_url)s/subjects/Lending_library">lending library</a>. Please <a href="%(base_url)s/ia/%(item_id)s/borrow">visit this book\'s page on Open Library</a> to access the book.'
+            'This book is part of the <a href="%(base_url)s/subjects/Lending_library">'
+            'lending library</a>. Please <a href="%(base_url)s/ia/%(item_id)s/borrow">'
+            'visit this book\'s page on Open Library</a> to access the book.'
             % resolution_dict
         )
 
     else:
         # If we know who this user is, from third-party cookies and they are logged into openlibrary.org, check if they have the loan
         if user:
-
             if loan['user'] != user.key:
                 # Borrowed by someone else - OR possibly came in through ezproxy and there's a stale login in on openlibrary.org
                 error_message = 'This book is checked out'
                 resolution_message = (
-                    'This book is currently checked out.  You can <a href="%(base_url)s/ia/%(item_id)s">visit this book\'s page on Open Library</a> or <a href="%(base_url)s/subjects/Lending_library">look at other books available to borrow</a>.'
-                    % resolution_dict
+                    'This book is currently checked out.  You can '
+                    '<a href="%(base_url)s/ia/%(item_id)s">visit this book\'s page on '
+                    'Open Library</a> or '
+                    '<a href="%(base_url)s/subjects/Lending_library">look at other '
+                    'books available to borrow</a>.' % resolution_dict
                 )
 
-            elif loan['expiry'] < datetime.datetime.utcnow().isoformat():
+            elif loan['expiry'] < datetime.utcnow().isoformat():
                 # User has the loan, but it's expired
                 error_message = 'Your loan has expired'
                 resolution_message = (
@@ -914,7 +828,12 @@ def get_ia_auth_dict(user, item_id, user_specified_loan_key, access_token):
                 # Couldn't validate using token - they need to go to Open Library
                 error_message = "Lending Library Book"
                 resolution_message = (
-                    'This book is part of the <a href="%(base_url)s/subjects/Lending_library" title="Open Library Lending Library">lending library</a>. Please <a href="%(base_url)s/ia/%(item_id)s/borrow" title="Borrow book page on Open Library">visit this book\'s page on Open Library</a> to access the book.  You must have cookies enabled for archive.org and openlibrary.org to access borrowed books.'
+                    'This book is part of the <a href="%(base_url)s/subjects/Lending_'
+                    'library" title="Open Library Lending Library">lending library</a>. '
+                    'Please <a href="%(base_url)s/ia/%(item_id)s/borrow" title="Borrow '
+                    'book page on Open Library">visit this book\'s page on Open Library'
+                    '</a> to access the book.  You must have cookies enabled for '
+                    'archive.org and openlibrary.org to access borrowed books.'
                     % resolution_dict
                 )
 
@@ -963,7 +882,6 @@ def make_ia_token(item_id, expiry_seconds):
 
 
 def ia_token_is_current(item_id, access_token):
-
     # Check if token has expired
     try:
         token_timestamp = access_token.split('-')[0]

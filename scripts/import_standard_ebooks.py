@@ -1,22 +1,23 @@
-#! /usr/bin/env python
+#!/usr/bin/env python
 import json
 import requests
 import time
-from typing import Any, Optional
+from typing import Any
 
-import os.path as path
+from os import path
 
 import feedparser
 
 from openlibrary.core.imports import Batch
 from scripts.solr_builder.solr_builder.fn_to_cli import FnToCLI
 from openlibrary.config import load_config
-from infogami import config  # noqa: F401
+from infogami import config
 
 FEED_URL = 'https://standardebooks.org/opds/all'
 LAST_UPDATED_TIME = './standard_ebooks_last_updated.txt'
 IMAGE_REL = 'http://opds-spec.org/image'
 BASE_SE_URL = 'https://standardebooks.org'
+
 
 def get_feed():
     """Fetches and returns Standard Ebook's feed."""
@@ -44,14 +45,12 @@ def map_data(entry) -> dict[str, Any]:
         "authors": [{"name": author.name} for author in entry.authors],
         "description": entry.content[0].value,
         "subjects": [tag.term for tag in entry.tags],
-        "identifiers": {
-            "standard_ebooks": [std_ebooks_id]
-        },
-        "languages": [marc_lang_code]
+        "identifiers": {"standard_ebooks": [std_ebooks_id]},
+        "languages": [marc_lang_code],
     }
 
     if image_uris:
-        import_record['cover'] = f'{BASE_SE_URL}{list(image_uris)[0]["href"]}'
+        import_record['cover'] = f'{BASE_SE_URL}{next(iter(image_uris))["href"]}'
 
     return import_record
 
@@ -66,13 +65,10 @@ def create_batch(records: list[dict[str, str]]) -> None:
     now = time.gmtime(time.time())
     batch_name = f'standardebooks-{now.tm_year}{now.tm_mon}'
     batch = Batch.find(batch_name) or Batch.new(batch_name)
-    batch.add_items([
-        {'ia_id': r['source_records'][0], 'data': r}
-        for r in records
-    ])
+    batch.add_items([{'ia_id': r['source_records'][0], 'data': r} for r in records])
 
 
-def get_last_updated_time() -> Optional[str]:
+def get_last_updated_time() -> str | None:
     """Gets date of last import job.
 
     Last updated dates are read from a local file.  If no
@@ -89,7 +85,7 @@ def get_last_updated_time() -> Optional[str]:
     return None
 
 
-def find_last_updated() -> Optional[str]:
+def find_last_updated() -> str | None:
     """Fetches and returns Standard Ebooks most recent update date.
 
     Returns None if the last modified date is not included in the
@@ -99,7 +95,7 @@ def find_last_updated() -> Optional[str]:
     return r.headers['last-modified'] if r.ok else None
 
 
-def convert_date_string(date_string: Optional[str]) -> time.struct_time:
+def convert_date_string(date_string: str | None) -> time.struct_time:
     """Converts HTTP-date format string into a struct_time object.
 
     The date_string will be formatted similarly to this:
@@ -127,20 +123,19 @@ def convert_date_string(date_string: Optional[str]) -> time.struct_time:
 
 
 def filter_modified_since(
-    entries,
-    modified_since: time.struct_time
+    entries, modified_since: time.struct_time
 ) -> list[dict[str, str]]:
     """Returns a list of import objects."""
     return [map_data(e) for e in entries if e.updated_parsed > modified_since]
 
 
 def import_job(
-        ol_config: str,
-        dry_run=False,
+    ol_config: str,
+    dry_run: bool = False,
 ) -> None:
     """
-    :param ol_config: Path to openlibrary.yml file
-    :param dry_run: If true, only print out records to import
+    :param str ol_config: Path to openlibrary.yml file
+    :param bool dry_run: If true, only print out records to import
     """
     load_config(ol_config)
 

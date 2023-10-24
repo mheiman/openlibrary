@@ -65,10 +65,7 @@ def compare_part(p1, p2):
 def compare_parts(parts1, parts2):
     if len(parts1) != len(parts2):
         return False
-    for i, j in zip(parts1, parts2):
-        if not compare_part(i, j):
-            return False
-    return True
+    return all(compare_part(i, j) for i, j in zip(parts1, parts2))
 
 
 def split_parts(s):
@@ -120,9 +117,8 @@ def marc_title(amazon_first_parts, marc_first_parts):
         if verbose:
             print("partial match with MARC end title")
         return True
-    if match_seq(marc_first_parts, amazon_first_parts):
-        if verbose:
-            print("partial match with MARC end title")
+    if verbose and match_seq(marc_first_parts, amazon_first_parts):
+        print("partial match with MARC end title")
     return False
 
 
@@ -227,8 +223,7 @@ def match_surname(surname, name):
 
 
 def amazon_spaced_name(amazon, marc):
-    len_amazon = len(amazon)
-    if len_amazon != 30 and len_amazon != 31:
+    if len(amazon) not in {30, 31}:
         return False
     m = re_amazon_space_name.search(amazon)
     if not m:
@@ -244,7 +239,7 @@ def amazon_spaced_name(amazon, marc):
     if normalize(amazon_surname) != normalize(marc_surname):
         return False
     marc_first_parts = split_parts(m.group(2))
-    amazon_first_parts = [x for x in amazon_initals]
+    amazon_first_parts = list(amazon_initals)
     if compare_parts(marc_first_parts, amazon_first_parts):
         return True
     if match_seq(amazon_first_parts, marc_first_parts):

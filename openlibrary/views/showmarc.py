@@ -99,7 +99,7 @@ class show_marc(app.view):
         if m:
             raise web.seeother('/show-records/ia:' + m.group(1))
         m = re_lc_sanfranpl.match(filename)
-        if m:  # archive.org is case-sensative
+        if m:  # archive.org is case-sensitive
             mixed_case = (
                 f'SanFranPL{m.group(1)}/SanFranPL{m.group(2)}.out:{offset}:{length}'
             )
@@ -108,7 +108,7 @@ class show_marc(app.view):
             loc = f'CollingswoodLibraryMarcDump10-27-2008/Collingswood.out:{offset}:{length}'
             raise web.seeother('/show-records/' + loc)
 
-        loc = ':'.join(['marc', filename, offset, length])
+        loc = f"marc:{filename}:{offset}:{length}"
 
         books = web.ctx.site.things(
             {
@@ -131,8 +131,7 @@ class show_marc(app.view):
         except requests.HTTPError as e:
             return "ERROR:" + str(e)
 
-        len_in_rec = int(result[:5])
-        if len_in_rec != length:
+        if (len_in_rec := int(result[:5])) != length:
             raise web.seeother(
                 '/show-records/%s:%d:%d' % (filename, offset, len_in_rec)
             )

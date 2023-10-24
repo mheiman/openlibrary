@@ -1,50 +1,69 @@
-$def with (doc, decorations=None, cta=True, availability=None, extra=None, attrs=None, rating=None, reading_log=None)
+$def with (doc, decorations=None, cta=True, availability=None, extra=None, attrs=None, rating=None, reading_log=None, show_librarian_extras=False, include_dropper=False, blur=False)
 
 $code:
+  max_rendered_authors = 9
   doc_type = (
     'infogami_work' if doc.get('type', {}).get('key') == '/type/work' else
     'infogami_edition' if doc.get('type', {}).get('key') == '/type/edition' else
-    'solr_work'
+    'solr_work' if not doc.get('editions') else
+    'solr_edition'
   )
 
-$ book_url = doc.url() if doc_type.startswith('infogami_') else doc.key
-$ book_provider = get_book_provider(doc)
-$if book_provider and doc_type.endswith('_work'):
-  $ work_edition_url = book_url + '?edition=' + urlquote(book_provider.get_best_identifier_slug(doc))
-$else:
-  $ work_edition_url = book_url
+  selected_ed = doc
+  if doc_type == 'solr_edition':
+    selected_ed = doc.get('editions')[0]
 
-$ edition_work = None
-$if doc_type == 'infogami_edition' and 'works' in doc:
-  $ edition_work = doc['works'][0]
+  book_url = doc.url() if doc_type.startswith('infogami_') else doc.key
+  if doc_type == 'solr_edition':
+    work_edition_url = book_url + '?edition=' + urlquote('key:' + selected_ed.key)
+  else:
+    book_provider = get_book_provider(doc)
+    if book_provider and doc_type.endswith('_work'):
+      work_edition_url = book_url + '?edition=' + urlquote(book_provider.get_best_identifier_slug(doc))
+    else:
+      work_edition_url = book_url
 
-$ max_rendered_authors = 9
+  work_edition_all_url = work_edition_url
+  if '?' in work_edition_url:
+    work_edition_all_url += '&mode=all'
+  else:
+    work_edition_all_url += '?mode=all'
+
+  edition_work = None
+  if doc_type == 'infogami_edition' and 'works' in doc:
+    edition_work = doc['works'][0]
+
+  full_title = selected_ed.get('title', '') + (': ' + selected_ed.subtitle if selected_ed.get('subtitle') else '')
+  if doc_type == 'infogami_edition' and edition_work:
+    full_work_title = edition_work.get('title', '') + (': ' + edition_work.subtitle if edition_work.get('subtitle') else '')
+  else:
+    full_work_title = doc.get('title', '') + (': ' + doc.subtitle if doc.get('subtitle') else '')
+
 <li class="searchResultItem" itemscope itemtype="https://schema.org/Book" $:attrs>
-  <span class="bookcover">
-    $ cover = get_cover_url(doc) or "/images/icons/avatar_book-sm.png"
+  $ blur_cover = "bookcover--blur" if blur else ""
+  <span class="bookcover $blur_cover">
+    $ cover = get_cover_url(selected_ed) or "/images/icons/avatar_book-sm.png"
     <a href="$work_edition_url"><img
             itemprop="image"
             src="$cover"
-            alt="Cover of: $doc.title$(': ' + doc.subtitle if doc.get('subtitle', None) else '')" title="Cover of: $doc.title$(': ' + doc.subtitle if doc.get('subtitle', None) else '')"
+            alt="$_('Cover of: %(title)s', title=full_title)"
+            title="$_('Cover of: %(title)s', title=full_title)"
     /></a>
   </span>
 
   <div class="details">
       <div class="resultTitle">
          <h3 itemprop="name" class="booktitle">
-           <a itemprop="url" href="$work_edition_url"
-              class="results">$doc.title$(': ' + doc.subtitle if doc.get('subtitle', None) else '')</a>
-           $if doc.get('publish_date'):
-             ($(doc['publish_date']))
+           <a itemprop="url" href="$work_edition_url" class="results">$full_title</a>
          </h3>
         </div>
-      <span itemprop="author" itemscope itemtype="https://schema.org/Organization" class="bookauthor">$_('by')
+      <span itemprop="author" itemscope itemtype="https://schema.org/Organization" class="bookauthor">
         $ authors = None
         $if doc_type == 'infogami_work':
           $ authors = doc.get_authors()
         $elif doc_type == 'infogami_edition':
           $ authors = edition_work.get_authors() if edition_work else doc.get_authors()
-        $elif doc_type == 'solr_work':
+        $elif doc_type.startswith('solr_'):
           $if 'authors' in doc:
             $ authors = doc['authors']
           $elif 'author_key' in doc:
@@ -52,15 +71,15 @@ $ max_rendered_authors = 9
         $if not authors:
           <em>$_('Unknown author')</em>
         $else:
-          $ remaining_authors = len(authors) - max_rendered_authors
-          $for a in authors[:max_rendered_authors]:
-            $ separator = ',' if not loop.last or remaining_authors > 0 else ''
-            $ url = a.get('url') or a.get('key') or a.get('author', {}).get('url') or a.get('author', {}).get('key')
-            $ name = a.get('name') or a.get('author', {}).get('name') or _('Unknown author')
-            <a itemprop="url" href="$url" class="results">$name</a>$separator
-          $if remaining_authors > 0:
-            <small><em><a itemprop="url" href="$work_edition_url"
-                                         class="results">$ungettext('and 1 other', 'and %(n)s others', remaining_authors, n=remaining_authors)</a></em></small>
+          $code:
+            author_names_and_urls = [
+              (
+                a.get('name') or a.get('author', {}).get('name'),
+                a.get('url') or a.get('key') or a.get('author', {}).get('url') or a.get('author', {}).get('key')
+              )
+              for a in authors
+            ]
+          $:macros.BookByline(author_names_and_urls, limit=max_rendered_authors, overflow_url=work_edition_url, attrs='class="results"')
       </span>
       <span class="resultPublisher">
         $if doc.get('first_publish_year'):
@@ -68,21 +87,30 @@ $ max_rendered_authors = 9
             $_('First published in %(year)s', year=doc.first_publish_year)
           </span>
         $if doc.get('edition_count'):
-          <a href="$work_edition_url#editions-list">$ungettext('1 edition', '%(count)d editions', doc.edition_count, count=doc.edition_count)</a>
+          <a href="$work_edition_all_url#editions-list">$ungettext('%(count)s edition', '%(count)s editions', doc.edition_count, count=doc.edition_count)</a>
           $if doc.get('languages'):
             <span class="languages">
-              $_('in') <a class="hoverlink" title="$(', '.join(doc.languages))">$(len(doc.languages)) $_('languages')</a>
+              $:ungettext('in <a class="hoverlink" title="%(langs)s">%(count)d language</a>', 'in <a class="hoverlink" title="%(langs)s">%(count)d languages</a>', len(doc.languages), count=len(doc.languages), langs=commify_list([get_language_name('/languages/' + lang) for lang in doc.languages]))
             </span>
           $if doc.get('ia'):
             &mdash; $_('%s previewable', len(doc.get('ia')))
             $if len(doc.get('ia')) > 1:
-              <span class="preview-covers">
+              $ blur_preview = "preview-covers--blur" if blur else ""
+              <span class="preview-covers $blur_preview">
                 $for x, i in enumerate(doc.get('ia')[1:10]):
                   <a href="$(book_url)?edition=ia:$(urlquote(i))">
                     <img width="30" height="45" loading="lazy" src="//archive.org/services/img/$i" alt="Cover of edition $i">
                   </a>
-                </span>
+              </span>
       </span>
+      $if show_librarian_extras:
+        <div class="searchResultItem__librarian-extras" title="$_('This is only visible to librarians.')">
+          $if doc_type == 'solr_edition' or (doc_type == 'infogami_edition' and edition_work):
+            <div>$_('Work Title'): <i>$full_work_title</i></div>
+          $ is_orphan = doc_type.startswith('solr_') and doc['key'].endswith('M') or doc_type == 'infogami_edition' and not edition_work
+          $if is_orphan:
+            <div>$_('Orphaned Edition')</div>
+        </div>
       $if extra:
         $:extra
       </div>
@@ -96,12 +124,23 @@ $ max_rendered_authors = 9
 
       <div class="searchResultItemCTA-lending">
         $if cta:
-          $ doc['availability'] = doc.get('availability', {}) or availability or {}
-          $:macros.LoanStatus(doc, work_key=doc.key)
+          $ selected_ed['availability'] = selected_ed.get('availability', {}) or doc.get('availability', {}) or availability or {}
+          $:macros.LoanStatus(selected_ed, work_key=doc.key)
       </div>
 
       $if reading_log:
         $:reading_log
+
+      $if include_dropper:
+        $ edition_key = None
+        $if doc_type == 'solr_edition':
+          $ edition_key = selected_ed.key
+        $elif doc_type == 'infogami_edition':
+          $ edition_key = doc.key
+        $elif doc_type == 'solr_work':
+          $ edition_key = doc.get('edition_key') and doc.get("edition_key")[0]
+          $ edition_key = '/books/%s' % edition_key
+        $:render_template('my_books/dropper', doc, edition_key=edition_key, async_load=True)
 
       $if rating:
         $:rating

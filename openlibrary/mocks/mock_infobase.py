@@ -9,8 +9,6 @@ import web
 from infogami.infobase import client, common, account, config as infobase_config
 from infogami import config
 
-import six
-
 
 key_patterns = {
     'work': '/works/OL%dW',
@@ -195,9 +193,8 @@ class MockSite:
         }
         pattern = ".*([%s])$" % "".join(operations)
         rx = web.re_compile(pattern)
-        m = rx.match(name)
 
-        if m:
+        if m := rx.match(name):
             op = m.group(1)
             name = name[:-1]
         else:
@@ -312,9 +309,7 @@ class MockSite:
                 return None
 
     def get_user(self):
-        auth_token = web.ctx.get("infobase_auth_token", "")
-
-        if auth_token:
+        if auth_token := web.ctx.get("infobase_auth_token", ""):
             try:
                 user_key, login_time, digest = auth_token.split(',')
             except ValueError:
@@ -356,13 +351,13 @@ class MockStore(dict):
         return [doc['_key'] for doc in self._query(**kw)]
 
     def values(self, **kw):
-        return [doc for doc in self._query(**kw)]
+        return list(self._query(**kw))
 
     def items(self, **kw):
         return [(doc["_key"], doc) for doc in self._query(**kw)]
 
 
-@pytest.fixture
+@pytest.fixture()
 def mock_site(request):
     """mock_site funcarg.
 
@@ -372,7 +367,7 @@ def mock_site(request):
     def read_types():
         for path in glob.glob("openlibrary/plugins/openlibrary/types/*.type"):
             text = open(path).read()
-            doc = eval(text, dict(true=True, false=False))
+            doc = eval(text, {'true': True, 'false': False})
             if isinstance(doc, list):
                 yield from doc
             else:

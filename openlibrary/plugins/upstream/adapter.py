@@ -11,8 +11,7 @@ This adapter module is a filter that sits above an Infobase server and fakes the
 import json
 import web
 
-import six
-from six.moves import urllib
+import urllib
 
 
 urls = (
@@ -173,8 +172,7 @@ def unconvert_dict(d):
 
 class get(proxy):
     def before_request(self):
-        i = self.input
-        if 'key' in i:
+        if 'key' in (i := self.input):
             i.key = convert_key(i.key)
 
 

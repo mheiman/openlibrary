@@ -1,5 +1,8 @@
+from openlibrary.mocks.mock_infobase import MockSite
 from .. import utils
+from openlibrary.catalog.add_book.tests.conftest import add_languages  # noqa: F401
 import web
+import pytest
 
 
 def test_url_quote():
@@ -25,8 +28,6 @@ def test_urlencode():
     assert f({'q': 1}) == 'q=1', 'numbers'
     assert f({'q': ['test']}) == 'q=%5B%27test%27%5D', 'list'
     assert f({'q': 'αβγ'}) == 'q=%CE%B1%CE%B2%CE%B3', 'unicode without the u'
-    # Can't run this since it's a SyntaxError in python3... But it passes in Python 2
-    # assert f({'q': b'αβγ'}) == 'q=%CE%B1%CE%B2%CE%B3', 'byte-string unicode?'
     assert f({'q': 'αβγ'.encode()}) == 'q=%CE%B1%CE%B2%CE%B3', 'uf8 encoded unicode'
     assert f({'q': 'αβγ'}) == 'q=%CE%B1%CE%B2%CE%B3', 'unicode'
 
@@ -88,7 +89,7 @@ def test_set_share_links_unicode():
 def test_item_image():
     assert utils.item_image('//foo') == 'https://foo'
     assert utils.item_image(None, 'bar') == 'bar'
-    assert utils.item_image(None) == None
+    assert utils.item_image(None) is None
 
 
 def test_canonical_url():
@@ -157,7 +158,146 @@ def test_reformat_html():
         f(multi_line_string) == 'This sentence has 32 '
         'characters.<br>This new sentence has 36 characters.'
     )
-    assert f(multi_line_string, 34) == 'This sentence has 32 ' 'characters.<br>T...'
+    assert f(multi_line_string, 34) == 'This sentence has 32 characters.<br>T...'
 
     assert f("<script>alert('hello')</script>", 34) == "alert(&#39;hello&#39;)"
     assert f("&lt;script&gt;") == "&lt;script&gt;"
+
+
+def test_strip_accents():
+    f = utils.strip_accents
+    assert f('Plain ASCII text') == 'Plain ASCII text'
+    assert f('Des idées napoléoniennes') == 'Des idees napoleoniennes'
+    # It only modifies Unicode Nonspacing Mark characters:
+    assert f('Bokmål : Standard Østnorsk') == 'Bokmal : Standard Østnorsk'
+
+
+def test_get_abbrev_from_full_lang_name(
+    mock_site: MockSite, monkeypatch, add_languages  # noqa F811
+) -> None:
+    utils.get_languages.cache_clear()
+
+    monkeypatch.setattr(web, "ctx", web.storage())
+    web.ctx.site = mock_site
+
+    web.ctx.site.save(
+        {
+            "code": "eng",
+            "key": "/languages/eng",
+            "name": "English",
+            "type": {"key": "/type/language"},
+            "name_translated": {
+                "tg": ["ингилисӣ"],
+                "en": ["English"],
+                "ay": ["Inlish aru"],
+                "pnb": ["انگریزی"],
+                "na": ["Dorerin Ingerand"],
+            },
+        }
+    )
+
+    web.ctx.site.save(
+        {
+            "code": "fre",
+            "key": "/languages/fre",
+            "name": "French",
+            "type": {"key": "/type/language"},
+            "name_translated": {
+                "ay": ["Inlish aru"],
+                "fr": ["anglais"],
+                "es": ["spanish"],
+            },
+        }
+    )
+
+    web.ctx.site.save(
+        {
+            "code": "spa",
+            "key": "/languages/spa",
+            "name": "Spanish",
+            "type": {"key": "/type/language"},
+        }
+    )
+
+    assert utils.get_abbrev_from_full_lang_name("EnGlish") == "eng"
+    assert utils.get_abbrev_from_full_lang_name("Dorerin Ingerand") == "eng"
+    assert utils.get_abbrev_from_full_lang_name("ингилисӣ") == "eng"
+    assert utils.get_abbrev_from_full_lang_name("ингилиси") == "eng"
+    assert utils.get_abbrev_from_full_lang_name("Anglais") == "fre"
+
+    # See openlibrary/catalog/add_book/tests/conftest.py for imported languages.
+    with pytest.raises(utils.LanguageMultipleMatchError):
+        utils.get_abbrev_from_full_lang_name("frisian")
+
+    with pytest.raises(utils.LanguageMultipleMatchError):
+        utils.get_abbrev_from_full_lang_name("inlish aru")
+
+    with pytest.raises(utils.LanguageMultipleMatchError):
+        utils.get_abbrev_from_full_lang_name("Spanish")
+
+    with pytest.raises(utils.LanguageNoMatchError):
+        utils.get_abbrev_from_full_lang_name("Missing or non-existent language")
+
+
+def test_get_colon_only_loc_pub() -> None:
+    # This is intended as a helper function, and its caller,
+    # get_location_and_publisher(), replaces certain characters,
+    # including "[" and "]".
+    test_cases = [
+        ("", ("", "")),
+        ("New York : Random House", ("New York", "Random House")),
+        ("[New York] : [Random House]", ("[New York]", "[Random House]")),
+        ("Random House,", ("", "Random House")),
+    ]
+
+    for tc, expected in test_cases:
+        result = utils.get_colon_only_loc_pub(tc)
+        assert result == expected, f"For {tc}, expected {expected}, but got {result}"
+
+
+def test_get_location_and_publisher() -> None:
+    # Empty string
+    assert utils.get_location_and_publisher("") == ([], [])
+
+    # Test simple case of "City : Publisher".
+    loc_pub = "Sŏul T'ŭkpyŏlsi : [Kimyŏngsa]"
+    assert utils.get_location_and_publisher(loc_pub) == (
+        ["Sŏul T'ŭkpyŏlsi"],
+        ["Kimyŏngsa"],
+    )
+
+    # Test multiple locations and one publisher.
+    loc_pub = "Londres ; [New York] ; Paris : Berlitz Publishing"
+    assert utils.get_location_and_publisher(loc_pub) == (
+        ["Londres", "New York", "Paris"],
+        ["Berlitz Publishing"],
+    )
+
+    # Test two locations and two corresponding publishers.
+    loc_pub = "Paris : Pearson ; San Jose (Calif.) : Adobe"
+    assert utils.get_location_and_publisher(loc_pub) == (
+        ["Paris", "San Jose (Calif.)"],
+        ["Pearson", "Adobe"],
+    )
+
+    # Test location not identified.
+    loc_pub = "[Place of publication not identified] : Pearson"
+    assert utils.get_location_and_publisher(loc_pub) == ([], ["Pearson"])
+
+    # "Pattern" breaker insofar as it has two colons separators in a row.
+    loc_pub = "London : Wise Publications ; Bury St. Edmunds, Suffolk : Exclusive Distributors : Music Sales Limited"
+    assert utils.get_location_and_publisher(loc_pub) == (
+        ["London"],
+        ["Wise Publications"],
+    )
+
+    # Bad input where Python thinks the IA metadata is a Python list
+    loc_pub = [  # type: ignore[assignment]
+        'Charleston, SC : Monkeypaw Press, LLC',
+        'Charleston, SC : [manufactured by CreateSpace]',
+    ]
+    assert utils.get_location_and_publisher(loc_pub) == ([], [])
+
+    # Separating a not identified place with a comma
+    loc_pub = "[Place of publication not identified], BARBOUR PUB INC"
+    assert utils.get_location_and_publisher(loc_pub) == ([], ["BARBOUR PUB INC"])

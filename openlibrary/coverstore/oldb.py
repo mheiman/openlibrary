@@ -53,11 +53,11 @@ def query(key, value):
     db = get_db()
     rows = db.query(
         "SELECT thing.key"
-        + " FROM thing, edition_str"
-        + " WHERE thing.id=edition_str.thing_id"
-        + " AND key_id=$key_id"
-        + " AND value=$value"
-        + " ORDER BY thing.last_modified LIMIT 10",
+        " FROM thing, edition_str"
+        " WHERE thing.id=edition_str.thing_id"
+        " AND key_id=$key_id"
+        " AND value=$value"
+        " ORDER BY thing.last_modified LIMIT 10",
         vars=locals(),
     )
     return [row.key for row in rows]
@@ -65,8 +65,7 @@ def query(key, value):
 
 def get(key):
     # try memcache
-    memcache = get_memcache()
-    if memcache:
+    if memcache := get_memcache():
         json_data = memcache.get(key)
         if json_data:
             return json.loads(json_data)

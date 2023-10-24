@@ -3,10 +3,9 @@ from splinter import Browser
 
 
 class TestMicrodata:
-
     host = 'http://localhost:8080'
 
-    @pytest.fixture
+    @pytest.fixture()
     def browser(self):
         browser = Browser('chrome')
         yield browser

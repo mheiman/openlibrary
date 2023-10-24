@@ -161,7 +161,8 @@ class recentchanges_view(delegate.page):
         if path != web.ctx.path:
             raise web.redirect(path)
         else:
-            tname = "recentchanges/" + change.kind + "/view"
+            kind = "merge" if change.kind.startswith("merge-") else change.kind
+            tname = "recentchanges/" + kind + "/view"
             if tname in render:
                 return render_template(tname, change)
             else:
@@ -192,5 +193,5 @@ class history(delegate.mode):
         i = web.input(page=0)
         offset = 20 * safeint(i.page)
         limit = 20
-        history = get_changes(dict(key=path, limit=limit, offset=offset))
+        history = get_changes({"key": path, "limit": limit, "offset": offset})
         return render.history(page, history)

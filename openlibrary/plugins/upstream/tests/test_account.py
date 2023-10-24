@@ -162,7 +162,7 @@ class TestGoodReadsImport:
         assert books_wo_isbns == self.expected_books_wo_isbns
 
 
-@pytest.mark.xfail
+@pytest.mark.xfail()
 class TestAccount:
     def signup(self, b, displayname, username, password, email):
         b.open("/account/create")
@@ -297,7 +297,7 @@ class TestAccount:
         assert b.path == "/account"
 
         b.reset()
-        assert self.login(b, "foo", "more_secret") == True
+        assert self.login(b, "foo", "more_secret") is True
 
     def test_change_email(self, ol):
         b = ol.browser()

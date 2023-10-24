@@ -14,35 +14,45 @@ import logging
 import os
 import re
 import sys
-import time
+from datetime import datetime
 
 import web
 
-from infogami import config
-from infogami.infobase.utils import flatten_dict
-from openlibrary.config import load_config
 from openlibrary.data import db
 from openlibrary.data.sitemap import generate_html_index, generate_sitemaps
 from openlibrary.plugins.openlibrary.processors import urlsafe
-from openlibrary.utils.sentry import Sentry
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.DEBUG)
 
 
-def print_dump(json_records, filter=None, print=print):
+def log(*args) -> None:
+    args_str = " ".join(str(a) for a in args)
+    msg = f"{datetime.now():%Y-%m-%d %H:%M:%S} [openlibrary.dump] {args_str}"
+    logger.info(msg)
+    print(msg, file=sys.stderr)
+
+
+def print_dump(json_records, filter=None):
     """Print the given json_records in the dump format."""
+    start_time = datetime.now()
     for i, raw_json_data in enumerate(json_records):
         if i % 1_000_000 == 0:
-            log(f"{i:,}")
+            log(f"print_dump {i:,}")
         d = json.loads(raw_json_data)
         d.pop("id", None)
         d = _process_data(d)
 
         key = web.safestr(d["key"])
 
-        # skip user and admin pages
-        if key.startswith(("/people/", "/admin/")):
+        # skip user pages
+        if key.startswith("/people/") and not re.match(
+            r"^/people/[^/]+/lists/OL\d+L$", key
+        ):
+            continue
+
+        # skip admin pages
+        if key.startswith("/admin/"):
             continue
 
         # skip obsolete pages. Obsolete pages include volumes, scan_records and users
@@ -58,6 +68,8 @@ def print_dump(json_records, filter=None, print=print):
         json_data = json.dumps(d)
 
         print("\t".join([type_key, key, str(d["revision"]), timestamp, json_data]))
+    minutes = (datetime.now() - start_time).seconds // 60
+    log(f"    print_dump() processed {i:,} records in {minutes:,} minutes.")
 
 
 def read_data_file(filename: str, max_lines: int = 0):
@@ -65,18 +77,15 @@ def read_data_file(filename: str, max_lines: int = 0):
     max_lines allows us to test the process with a subset of all records.
     Setting max_lines to 0 will processes all records.
     """
+    start_time = datetime.now()
     log(f"read_data_file({filename}, max_lines={max_lines if max_lines else 'all'})")
     for i, line in enumerate(xopen(filename, "rt")):
         thing_id, revision, json_data = line.strip().split("\t")
         yield pgdecode(json_data)
         if max_lines and i >= max_lines:
             break
-
-
-def log(*args) -> None:
-    msg = " ".join(str(a) for a in args)
-    logger.info(msg)
-    print(time.asctime(), msg, file=sys.stderr)
+    minutes = (datetime.now() - start_time).seconds // 60
+    log(f"read_data_file() processed {i:,} records in {minutes:,} minutes.")
 
 
 def xopen(path: str, mode: str):
@@ -88,23 +97,25 @@ def xopen(path: str, mode: str):
 
 def read_tsv(file, strip=True):
     """Read a tab separated file and return an iterator over rows."""
-    log("read_tsv() reading", file)
+    start_time = datetime.now()
+    log(f"read_tsv({file})")
     if isinstance(file, str):
         file = xopen(file, "rt")
 
     for i, line in enumerate(file):
         if i % 1_000_000 == 0:
-            log(f"{i:,}")
+            log(f"read_tsv {i:,}")
         if strip:
             line = line.strip()
         yield line.split("\t")
+    minutes = (datetime.now() - start_time).seconds // 60
+    log(f" read_tsv() processed {i:,} records in {minutes:,} minutes.")
 
 
 def generate_cdump(data_file, date=None):
     """Generates cdump from a copy of data table.  If date is specified, only revisions
     created on or before that date will be considered.
     """
-    logger.error(f"generate_cdump({data_file}, {date}) reading")
     # adding Z to the date will make sure all the timestamps are less than that date.
     #
     #   >>> "2010-05-17T10:20:30" < "2010-05-17"
@@ -114,6 +125,7 @@ def generate_cdump(data_file, date=None):
     #
     # If scripts/oldump.sh has exported $OLDUMP_TESTING then save a lot of time by only
     # processing a subset of the lines in data_file.
+    log(f"generate_cdump({data_file}, {date}) reading")
     max_lines = 1_000_000 if os.getenv("OLDUMP_TESTING") else 0  # 0 means unlimited.
     filter = date and (lambda doc: doc["last_modified"]["value"] < date + "Z")
     print_dump(read_data_file(data_file, max_lines), filter=filter)
@@ -121,6 +133,7 @@ def generate_cdump(data_file, date=None):
 
 def sort_dump(dump_file=None, tmpdir="/tmp/", buffer_size="1G"):
     """Sort the given dump based on key."""
+    start_time = datetime.now()
     tmpdir = os.path.join(tmpdir, "oldumpsort")
     if not os.path.exists(tmpdir):
         os.makedirs(tmpdir)
@@ -132,10 +145,10 @@ def sort_dump(dump_file=None, tmpdir="/tmp/", buffer_size="1G"):
     stdin = xopen(dump_file, "rb") if dump_file else sys.stdin.buffer
 
     # split the file into 256 chunks using hash of key
-    log("splitting", dump_file or "stdin")
+    log("sort_dump", dump_file or "stdin")
     for i, line in enumerate(stdin):
         if i % 1_000_000 == 0:
-            log(f"{i:,}")
+            log(f"sort_dump {i:,}")
 
         type, key, revision, timestamp, json_data = line.strip().split(b"\t")
         findex = hash(key) % 256
@@ -147,12 +160,14 @@ def sort_dump(dump_file=None, tmpdir="/tmp/", buffer_size="1G"):
     files = []
 
     for fname in filenames:
-        log("sorting", fname)
+        log("sort_dump", fname)
         status = os.system(
             "gzip -cd %(fname)s | sort -S%(buffer_size)s -k2,3" % locals()
         )
         if status != 0:
             raise Exception("sort failed with status %d" % status)
+    minutes = (datetime.now() - start_time).seconds // 60
+    log(f"sort_dump() processed {i:,} records in {minutes:,} minutes.")
 
 
 def generate_dump(cdump_file=None):
@@ -162,15 +177,18 @@ def generate_dump(cdump_file=None):
     """
 
     def process(data):
-        revision = lambda cols: int(cols[2])
+        revision = lambda cols: int(cols[2])  # noqa: E731
         for key, rows in itertools.groupby(data, key=lambda cols: cols[1]):
             row = max(rows, key=revision)
             yield row
 
+    start_time = datetime.now()
     tjoin = "\t".join
     data = read_tsv(cdump_file or sys.stdin, strip=False)
     # group by key and find the max by revision
     sys.stdout.writelines(tjoin(row) for row in process(data))
+    minutes = (datetime.now() - start_time).seconds // 60
+    log(f"generate_dump({cdump_file}) ran in {minutes:,} minutes.")
 
 
 def generate_idump(day, **db_parameters):
@@ -178,11 +196,12 @@ def generate_idump(day, **db_parameters):
     db.setup_database(**db_parameters)
     rows = db.longquery(
         "SELECT data.* FROM data, version, transaction "
-        + " WHERE data.thing_id=version.thing_id"
-        + "     AND data.revision=version.revision"
-        + "     AND version.transaction_id=transaction.id"
-        + "     AND transaction.created >= $day AND transaction.created < date $day + interval '1 day'"
-        + " ORDER BY transaction.created",
+        " WHERE data.thing_id=version.thing_id"
+        "     AND data.revision=version.revision"
+        "     AND version.transaction_id=transaction.id"
+        "     AND transaction.created >= $day"
+        "     AND transaction.created < date $day + interval '1 day'"
+        " ORDER BY transaction.created",
         vars=locals(),
         chunk_size=10_000,
     )
@@ -191,7 +210,15 @@ def generate_idump(day, **db_parameters):
 
 def split_dump(dump_file=None, format="oldump_%s.txt"):
     """Split dump into authors, editions and works."""
-    types = ("/type/edition", "/type/author", "/type/work", "/type/redirect")
+    log(f"split_dump({dump_file}, format={format})")
+    start_time = datetime.now()
+    types = (
+        "/type/edition",
+        "/type/author",
+        "/type/work",
+        "/type/redirect",
+        "/type/list",
+    )
     files = {}
     for t in types:
         tname = t.split("/")[-1] + "s"
@@ -200,24 +227,28 @@ def split_dump(dump_file=None, format="oldump_%s.txt"):
     stdin = xopen(dump_file, "rt") if dump_file else sys.stdin
     for i, line in enumerate(stdin):
         if i % 1_000_000 == 0:
-            log(f"{i:,}")
+            log(f"split_dump {i:,}")
         type, rest = line.split("\t", 1)
         if type in files:
             files[type].write(line)
 
     for f in files.values():
         f.close()
+    minutes = (datetime.now() - start_time).seconds // 60
+    log(f"split_dump() processed {i:,} records in {minutes:,} minutes.")
 
 
 def make_index(dump_file):
     """Make index with "path", "title", "created" and "last_modified" columns."""
-
-    for type, key, revision, timestamp, json_data in read_tsv(dump_file):
+    log(f"make_index({dump_file})")
+    start_time = datetime.now()
+    for i, line in enumerate(read_tsv(dump_file)):
+        type, key, revision, timestamp, json_data = line
         data = json.loads(json_data)
         if type in ("/type/edition", "/type/work"):
             title = data.get("title", "untitled")
             path = key + "/" + urlsafe(title)
-        elif type == "/type/author":
+        elif type in ("/type/author", "/type/list"):
             title = data.get("name", "unnamed")
             path = key + "/" + urlsafe(title)
         else:
@@ -231,6 +262,9 @@ def make_index(dump_file):
         else:
             created = "-"
         print("\t".join([web.safestr(path), web.safestr(title), created, timestamp]))
+    minutes = (datetime.now() - start_time).seconds // 60
+    log(f"make_index() processed {i:,} records in {minutes:,} minutes.")
+
 
 def _process_key(key):
     mapping = {
@@ -278,18 +312,8 @@ def _make_sub(d):
     return lambda s: s and rx.sub(f, s)
 
 
-def _invert_dict(d):
-    return {v: k for (k, v) in d.items()}
-
-
-_pgencode_dict = {"\n": r"\n", "\r": r"\r", "\t": r"\t", "\\": r"\\"}
-_pgencode = _make_sub(_pgencode_dict)
-_pgdecode = _make_sub(_invert_dict(_pgencode_dict))
-
-
-def pgencode(text):
-    """Reverse of pgdecode."""
-    return _pgdecode(text)
+_pgdecode_dict = {r"\n": "\n", r"\r": "\r", r"\t": "\t", r"\\": "\\"}
+_pgdecode = _make_sub(_pgdecode_dict)
 
 
 def pgdecode(text):
@@ -328,21 +352,10 @@ def main(cmd, args):
     }.get(cmd)
     if func:
         func(*args, **kwargs)
-    elif cmd == "solrdump":
-        from openlibrary.data import solr  # noqa: E402 avoid circular import
-        solr.generate_dump(*args, **kwargs)
     else:
+        log(f"Unknown command: {cmd}")
         logger.error(f"Unknown command: {cmd}")
-        print("Unknown command:", cmd, file=sys.stderr)
 
 
 if __name__ == "__main__":
-    ol_config = os.getenv("OL_CONFIG")
-    if ol_config:
-        logger.info(f"loading config from {ol_config}")
-        load_config(ol_config)
-        sentry = Sentry(getattr(config, 'sentry_cron_jobs', {}))
-        if sentry.enabled:
-            sentry.init()
-
     main(sys.argv[1], sys.argv[2:])

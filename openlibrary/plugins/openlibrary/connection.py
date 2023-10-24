@@ -12,8 +12,6 @@ from openlibrary.core import ia
 
 import logging
 
-import six
-
 
 logger = logging.getLogger("openlibrary")
 
@@ -114,7 +112,7 @@ class IAMiddleware(ConnectionMiddleware):
     def _get_itemid(self, key):
         """Returns internet archive item id from the key.
 
-        If the key is of the form "/books/ia:.*", the part ofter "/books/ia:"
+        If the key is of the form "/books/ia:.*", the part after "/books/ia:"
         is returned, otherwise None is returned.
         """
         if key and key.startswith("/books/ia:") and key.count("/") == 2:
@@ -123,8 +121,7 @@ class IAMiddleware(ConnectionMiddleware):
     def get(self, sitename, data):
         key = data.get('key')
 
-        itemid = self._get_itemid(key)
-        if itemid:
+        if itemid := self._get_itemid(key):
             edition_key = self._find_edition(sitename, itemid)
             if edition_key:
                 # Delete the store entry, indicating that this is no more is an item to be imported.
@@ -505,12 +502,11 @@ class MigrationMiddleware(ConnectionMiddleware):
                 doc['authors'] = [
                     a for a in doc['authors'] if 'author' in a and 'key' in a['author']
                 ]
-        elif type == "/type/edition":
+        elif type == "/type/edition" and 'title_prefix' in doc:
             # get rid of title_prefix.
-            if 'title_prefix' in doc:
-                title = doc['title_prefix'].strip() + ' ' + doc.get('title', '')
-                doc['title'] = title.strip()
-                del doc['title_prefix']
+            title = doc['title_prefix'].strip() + ' ' + doc.get('title', '')
+            doc['title'] = title.strip()
+            del doc['title_prefix']
 
         return doc
 
@@ -518,7 +514,7 @@ class MigrationMiddleware(ConnectionMiddleware):
         """Some work/edition records references to redirected author records
         and that is making save fail.
 
-        This is a hack to work-around that isse.
+        This is a hack to work-around that issue.
         """
         json_data = self.get("openlibrary.org", {"key": key})
         if json:

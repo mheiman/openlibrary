@@ -136,8 +136,7 @@ def level2_merge(e1, e2):
     score.append(compare_isbn10(e1, e2))
     score.append(compare_title(e1, e2))
     score.append(compare_lccn(e1, e2))
-    page_score = compare_number_of_pages(e1, e2)
-    if page_score:
+    if page_score := compare_number_of_pages(e1, e2):
         score.append(page_score)
     score.append(compare_publisher(e1, e2))
     score.append(compare_authors(e1, e2))
@@ -176,27 +175,24 @@ def compare_authors(e1, e2):
     Compares the authors of two edition representations and
     returns a evaluation and score.
 
-    :param dict e1: Edition, output of build_marc()
-    :param dict e2: Edition, output of build_marc()
+    :param dict e1: Edition, output of expand_record()
+    :param dict e2: Edition, output of expand_record()
     :rtype: tuple
     :return: str?, message, score
     """
 
-    if 'authors' in e1 and 'authors' in e2:
+    if 'authors' in e1 and 'authors' in e2:  # noqa: SIM102
         if compare_author_fields(e1['authors'], e2['authors']):
             return ('authors', 'exact match', 125)
-    if (
-        'authors' in e1
-        and 'contribs' in e2
-        and compare_author_fields(e1['authors'], e2['contribs'])
-    ):
-        return ('authors', 'exact match', 125)
-    if (
-        'contribs' in e1
-        and 'authors' in e2
-        and compare_author_fields(e1['contribs'], e2['authors'])
-    ):
-        return ('authors', 'exact match', 125)
+
+    if 'authors' in e1 and 'contribs' in e2:  # noqa: SIM102
+        if compare_author_fields(e1['authors'], e2['contribs']):
+            return ('authors', 'exact match', 125)
+
+    if 'contribs' in e1 and 'authors' in e2:  # noqa: SIM102
+        if compare_author_fields(e1['contribs'], e2['authors']):
+            return ('authors', 'exact match', 125)
+
     if 'authors' in e1 and 'authors' in e2:
         return compare_author_keywords(e1['authors'], e2['authors'])
 
@@ -289,10 +285,7 @@ def short_part_publisher_match(p1, p2):
     pub2 = p2.split()
     if len(pub1) == 1 or len(pub2) == 1:
         return False
-    for i, j in zip(pub1, pub2):
-        if not substr_match(i, j):
-            return False
-    return True
+    return all(substr_match(i, j) for i, j in zip(pub1, pub2))
 
 
 def compare_publisher(e1, e2):
@@ -303,9 +296,9 @@ def compare_publisher(e1, e2):
                 e2_norm = normalize(e2_pub)
                 if e1_norm == e2_norm:
                     return ('publisher', 'match', 100)
-                elif substr_match(e1_norm, e2_norm):
-                    return ('publisher', 'occur within the other', 100)
-                elif substr_match(e1_norm.replace(' ', ''), e2_norm.replace(' ', '')):
+                elif substr_match(e1_norm, e2_norm) or substr_match(
+                    e1_norm.replace(' ', ''), e2_norm.replace(' ', '')
+                ):
                     return ('publisher', 'occur within the other', 100)
                 elif short_part_publisher_match(e1_norm, e2_norm):
                     return ('publisher', 'match', 100)
@@ -313,41 +306,6 @@ def compare_publisher(e1, e2):
 
     if 'publishers' not in e1 or 'publishers' not in e2:
         return ('publisher', 'either missing', 0)
-
-
-def build_marc(edition):
-    """
-    Returns an expanded representation of an edition dict,
-    usable for accurate comparisons between existing and new
-    records.
-    Called from openlibrary.catalog.add_book.load()
-
-    :param dict edition: Import edition representation, requires 'full_title'
-    :rtype: dict
-    :return: An expanded version of an edition dict
-        more titles, normalized + short
-        all isbns in "isbn": []
-    """
-    marc = build_titles(edition['full_title'])
-    marc['isbn'] = []
-    for f in 'isbn', 'isbn_10', 'isbn_13':
-        marc['isbn'].extend(edition.get(f, []))
-    if 'publish_country' in edition and edition['publish_country'] not in (
-        '   ',
-        '|||',
-    ):
-        marc['publish_country'] = edition['publish_country']
-    for f in (
-        'lccn',
-        'publishers',
-        'publish_date',
-        'number_of_pages',
-        'authors',
-        'contribs',
-    ):
-        if f in edition:
-            marc[f] = edition[f]
-    return marc
 
 
 def attempt_merge(e1, e2, threshold, debug=False):

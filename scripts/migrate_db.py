@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#!/usr/bin/env python
 """Script to migrate the OL database to latest schema.
 """
 
@@ -63,9 +63,9 @@ class Upgrader:
         # populate changes
         rows = db.query(
             "SELECT thing.key, version.revision, version.transaction_id"
-            + " FROM  thing, version"
-            + " WHERE thing.id=version.thing_id"
-            + " ORDER BY version.transaction_id"
+            " FROM  thing, version"
+            " WHERE thing.id=version.thing_id"
+            " ORDER BY version.transaction_id"
         )
 
         for tx_id, changes in itertools.groupby(rows, lambda row: row.transaction_id):
@@ -108,8 +108,8 @@ class Upgrader:
     def read_schema(self, db):
         rows = db.query(
             "SELECT table_name, column_name,  data_type "
-            + " FROM information_schema.columns"
-            + " WHERE table_schema = 'public'"
+            " FROM information_schema.columns"
+            " WHERE table_schema = 'public'"
         )
 
         schema = web.storage()

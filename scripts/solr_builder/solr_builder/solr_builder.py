@@ -1,31 +1,33 @@
+from __future__ import annotations
+
 import json
-from typing import Awaitable, Literal
-
-
-from configparser import ConfigParser
 import logging
 import time
 import uuid
 from collections import namedtuple
+from collections.abc import Awaitable, Iterator
+from configparser import ConfigParser
+from typing import Any, Literal, Self
 
+import aiofiles
 import psycopg2
 
+from openlibrary.core.bookshelves import Bookshelves
+from openlibrary.core.ratings import Ratings, WorkRatingsSummary
 from openlibrary.solr import update_work
-from openlibrary.solr.data_provider import DataProvider
+from openlibrary.solr.data_provider import DataProvider, WorkReadingLogSolrSummary
 from openlibrary.solr.update_work import load_configs, update_keys
-
 
 logger = logging.getLogger("openlibrary.solr-builder")
 
 
-def config_section_to_dict(config_file, section):
+def config_section_to_dict(config_file: str, section: str) -> dict:
     """
     Read a config file's section as a dict
 
     :param str config_file: filename of config file
     :param str section: section to pull data from
     :return: dict of key value pairs
-    :rtype: dict
     """
     config = ConfigParser()
     config.read(config_file)
@@ -54,17 +56,19 @@ class LocalPostgresDataProvider(DataProvider):
     This class uses a local postgres dump of the database.
     """
 
-    def __init__(self, db_conf_file):
+    def __init__(self, db_conf_file: str):
         """
         :param str db_conf_file: file to DB config with [postgres] section
         """
         super().__init__()
         self._db_conf = config_section_to_dict(db_conf_file, "postgres")
-        self._conn = None  # type: psycopg2._psycopg.connection
-        self.cache = dict()
-        self.cached_work_editions_ranges = []
+        self._conn: psycopg2._psycopg.connection = None
+        self.cache: dict = {}
+        self.cached_work_editions_ranges: list = []
+        self.cached_work_ratings: dict[str, WorkRatingsSummary] = {}
+        self.cached_work_reading_logs: dict[str, WorkReadingLogSolrSummary] = {}
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """
         :rtype: LocalPostgresDataProvider
         """
@@ -75,12 +79,10 @@ class LocalPostgresDataProvider(DataProvider):
         self.clear_cache()
         self._conn.close()
 
-    def query_all(self, query, cache_json=False):
+    def query_all(self, query: str, json_cache: dict | None = None) -> list:
         """
-
-        :param str query:
-        :param bool cache_json:
-        :rtype: list
+        :param json_cache: if specified, adds records in the second column to the
+        provided dict, with the first column as keys
         """
         cur = self._conn.cursor()
         cur.execute(query)
@@ -88,8 +90,8 @@ class LocalPostgresDataProvider(DataProvider):
         cur.close()
 
         if rows:
-            if cache_json:
-                self.cache.update({row[0]: row[1] for row in rows})
+            if json_cache is not None:
+                json_cache.update({row[0]: row[1] for row in rows})
             return rows
         else:
             return []
@@ -106,13 +108,19 @@ class LocalPostgresDataProvider(DataProvider):
 
         cur.close()
 
-    def query_batched(self, query, size, cursor_name=None, cache_json=False):
+    def query_batched(
+        self,
+        query: str,
+        size: int,
+        cursor_name: str | None = None,
+        cache_json: bool = False,
+    ) -> Iterator:
         """
         :param str query:
         :param int size:
         :param str or None cursor_name: if wanting to use a specific cursor
         :param bool cache_json: Requires the select statement to be "Key", "JSON"
-        :return:
+        :return: None
         """
         # Not sure if this name needs to be unique
         cursor_name = (
@@ -134,33 +142,29 @@ class LocalPostgresDataProvider(DataProvider):
         cur.close()
 
     def cache_edition_works(self, lo_key, hi_key):
-        q = """
+        q = f"""
             SELECT works."Key", works."JSON"
             FROM "test" editions
             INNER JOIN test works
                 ON editions."JSON" -> 'works' -> 0 ->> 'key' = works."Key"
             WHERE editions."Type" = '/type/edition'
-                AND '{}' <= editions."Key" AND editions."Key" <= '{}'
-        """.format(
-            lo_key, hi_key
-        )
-        self.query_all(q, cache_json=True)
+                AND '{lo_key}' <= editions."Key" AND editions."Key" <= '{hi_key}'
+        """
+        self.query_all(q, json_cache=self.cache)
 
     def cache_work_editions(self, lo_key, hi_key):
-        q = """
+        q = f"""
             SELECT "Key", "JSON"
             FROM "test"
             WHERE "Type" = '/type/edition'
-                AND '{}' <= "JSON" -> 'works' -> 0 ->> 'key'
-                AND "JSON" -> 'works' -> 0 ->> 'key' <= '{}'
-        """.format(
-            lo_key, hi_key
-        )
-        self.query_all(q, cache_json=True)
+                AND '{lo_key}' <= "JSON" -> 'works' -> 0 ->> 'key'
+                AND "JSON" -> 'works' -> 0 ->> 'key' <= '{hi_key}'
+        """
+        self.query_all(q, json_cache=self.cache)
         self.cached_work_editions_ranges.append((lo_key, hi_key))
 
     def cache_edition_authors(self, lo_key, hi_key):
-        q = """
+        q = f"""
             SELECT authors."Key", authors."JSON"
             FROM "test" editions
             INNER JOIN test works
@@ -169,15 +173,13 @@ class LocalPostgresDataProvider(DataProvider):
                 ON works."JSON" -> 'authors' -> 0 -> 'author' ->> 'key' = authors."Key"
             WHERE editions."Type" = '/type/edition'
                 AND editions."JSON" -> 'works' -> 0 ->> 'key' IS NULL
-                AND '{}' <= editions."Key" AND editions."Key" <= '{}'
-        """.format(
-            lo_key, hi_key
-        )
-        self.query_all(q, cache_json=True)
+                AND '{lo_key}' <= editions."Key" AND editions."Key" <= '{hi_key}'
+        """
+        self.query_all(q, json_cache=self.cache)
 
     def cache_work_authors(self, lo_key, hi_key):
         # Cache upto first five authors
-        q = """
+        q = f"""
             SELECT authors."Key", authors."JSON"
             FROM "test" works
             INNER JOIN "test" authors ON (
@@ -188,11 +190,53 @@ class LocalPostgresDataProvider(DataProvider):
                 works."JSON" -> 'authors' -> 4 -> 'author' ->> 'key' = authors."Key"
             )
             WHERE works."Type" = '/type/work'
-            AND '{}' <= works."Key" AND works."Key" <= '{}'
-        """.format(
-            lo_key, hi_key
+            AND '{lo_key}' <= works."Key" AND works."Key" <= '{hi_key}'
+        """
+        self.query_all(q, json_cache=self.cache)
+
+    def cache_work_ratings(self, lo_key, hi_key):
+        q = f"""
+            SELECT "WorkKey", json_build_object(
+                'ratings_count_1', count(*) filter (where "Rating" = 1),
+                'ratings_count_2', count(*) filter (where "Rating" = 2),
+                'ratings_count_3', count(*) filter (where "Rating" = 3),
+                'ratings_count_4', count(*) filter (where "Rating" = 4),
+                'ratings_count_5', count(*) filter (where "Rating" = 5)
+            )
+            FROM "ratings"
+            WHERE '{lo_key}' <= "WorkKey" AND "WorkKey" <= '{hi_key}'
+            GROUP BY "WorkKey"
+            ORDER BY "WorkKey" asc
+        """
+        self.query_all(q, json_cache=self.cached_work_ratings)
+        for row in self.cached_work_ratings.values():
+            row.update(
+                Ratings.work_ratings_summary_from_counts(
+                    [row[f'ratings_count_{i}'] for i in range(1, 6)]
+                )
+            )
+
+    def cache_work_reading_logs(self, lo_key: str, hi_key: str):
+        per_shelf_fields = ', '.join(
+            f"""
+                '{json_name}_count', count(*) filter (where "Shelf" = '{human_name}')
+            """.strip()
+            for json_name, human_name in zip(
+                Bookshelves.PRESET_BOOKSHELVES_JSON.keys(),
+                Bookshelves.PRESET_BOOKSHELVES.keys(),
+            )
         )
-        self.query_all(q, cache_json=True)
+        q = f"""
+            SELECT "WorkKey", json_build_object(
+                'readinglog_count', count(*),
+                {per_shelf_fields}
+            )
+            FROM "reading_log"
+            WHERE '{lo_key}' <= "WorkKey" AND "WorkKey" <= '{hi_key}'
+            GROUP BY "WorkKey"
+            ORDER BY "WorkKey" asc
+        """
+        self.query_all(q, json_cache=self.cached_work_reading_logs)
 
     async def cache_cached_editions_ia_metadata(self):
         ocaids = list({doc['ocaid'] for doc in self.cache.values() if 'ocaid' in doc})
@@ -237,6 +281,12 @@ class LocalPostgresDataProvider(DataProvider):
         else:
             return self.get_editions_of_work_direct(work)
 
+    def get_work_ratings(self, work_key: str) -> WorkRatingsSummary | None:
+        return self.cached_work_ratings.get(work_key)
+
+    def get_work_reading_log(self, work_key: str) -> WorkReadingLogSolrSummary | None:
+        return self.cached_work_reading_logs.get(work_key)
+
     async def get_document(self, key):
         if key in self.cache:
             logger.debug("get_document cache hit %s", key)
@@ -258,6 +308,7 @@ class LocalPostgresDataProvider(DataProvider):
     def clear_cache(self):
         super().clear_cache()
         self.cached_work_editions_ranges.clear()
+        self.cached_work_ratings.clear()
         self.cache.clear()
 
 
@@ -277,10 +328,10 @@ async def simple_timeit_async(awaitable: Awaitable):
 
 def build_job_query(
     job: Literal['works', 'orphans', 'authors'],
-    start_at: str = None,
+    start_at: str | None = None,
     offset: int = 0,
-    last_modified: str = None,
-    limit: int = None,
+    last_modified: str | None = None,
+    limit: int | None = None,
 ) -> str:
     """
     :param job: job to complete
@@ -314,7 +365,7 @@ def build_job_query(
     if job == 'orphans':
         q_where += """ AND "JSON" -> 'works' -> 0 ->> 'key' IS NULL"""
 
-    return ' '.join([q_select, q_where, q_order, q_offset, q_limit])
+    return f"{q_select} {q_where} {q_order} {q_offset} {q_limit}"
 
 
 async def main(
@@ -323,16 +374,16 @@ async def main(
     postgres="postgres.ini",
     ol="http://ol/",
     ol_config="../../conf/openlibrary.yml",
-    solr: str = None,
-    skip_solr_id_check=True,
-    start_at: str = None,
+    solr: str | None = None,
+    skip_solr_id_check: bool = True,
+    start_at: str | None = None,
     offset=0,
     limit=1,
-    last_modified: str = None,
-    progress: str = None,
-    log_file: str = None,
+    last_modified: str | None = None,
+    progress: str | None = None,
+    log_file: str | None = None,
     log_level=logging.INFO,
-    dry_run=False,
+    dry_run: bool = False,
 ) -> None:
     """
     :param cmd: Whether to do the index or just fetch end of the chunk
@@ -398,17 +449,17 @@ async def main(
 
         def update(
             self,
-            seen=None,
-            total=None,
-            percent=None,
-            elapsed=None,
-            q_1=None,
-            q_auth=None,
-            cached=None,
-            q_ia=None,
-            ia_cache=None,
-            next=None,
-        ):
+            seen: str | int | None = None,
+            total: str | int | None = None,
+            percent: str | float | None = None,
+            elapsed: str | float | None = None,
+            q_1: str | float | None = None,
+            q_auth: str | float | None = None,
+            cached: str | int | None = None,
+            q_ia: str | float | None = None,
+            ia_cache: str | int | None = None,
+            next: str | None = None,
+        ) -> None:
             """
             :param str or int or None seen:
             :param str or int or None total:
@@ -428,11 +479,11 @@ async def main(
             )
             self.log(entry)
 
-        def fmt(self, k, val):
+        def fmt(self, k: str, val: Any) -> str:
             """
             :param str k:
             :param Any val:
-            :rtype: str
+            :return: str
             """
             if val is None:
                 return '?'
@@ -474,10 +525,10 @@ async def main(
 
         if progress:
             # Clear the file
-            with open(progress, 'w') as f:
-                f.write('')
-            with open(progress, 'a') as f:
-                f.write('Calculating total... ')
+            async with aiofiles.open(progress, 'w') as f:
+                await f.write('')
+            async with aiofiles.open(progress, 'a') as f:
+                await f.write('Calculating total... ')
 
         start = time.time()
         q_count = """SELECT COUNT(*) FROM(%s) AS foo""" % q
@@ -485,9 +536,9 @@ async def main(
         end = time.time()
 
         if progress:
-            with open(progress, 'a') as f:
-                f.write('%d (%.2fs)\n' % (count, end - start))
-                f.write('\t'.join(PLogEntry._fields) + '\n')
+            async with aiofiles.open(progress, 'a') as f:
+                await f.write('%d (%.2fs)\n' % (count, end - start))
+                await f.write('\t'.join(PLogEntry._fields) + '\n')
 
         plog.log(
             PLogEntry(0, count, '0.00%', 0, '?', '?', '?', '?', '?', start_at or '?')
@@ -530,6 +581,10 @@ async def main(
                         q_auth=plog.last_entry.q_auth + authors_time,
                         cached=len(db.cache) + len(db2.cache),
                     )
+
+                    # cache ratings and reading logs
+                    db2.cache_work_ratings(*key_range)
+                    db2.cache_work_reading_logs(*key_range)
                 elif job == "orphans":
                     # cache editions' ocaid metadata
                     ocaids_time, _ = await simple_timeit_async(
@@ -557,11 +612,12 @@ async def main(
                 db.cache.update(db2.cache)
                 db.ia_cache.update(db2.ia_cache)
                 db.cached_work_editions_ranges += db2.cached_work_editions_ranges
+                db.cached_work_ratings.update(db2.cached_work_ratings)
+                db.cached_work_reading_logs.update(db2.cached_work_reading_logs)
 
             await update_keys(
                 keys,
                 commit=False,
-                commit_way_later=True,
                 skip_id_check=skip_solr_id_check,
                 update='quiet' if dry_run else 'update',
             )

@@ -2,12 +2,11 @@ import logging
 import re
 from functools import cached_property
 
-import requests
 import sys
 import web
 
 from collections import defaultdict
-from isbnlib import canonical
+from isbnlib import canonical, mask, NotValidISBNError
 
 from infogami import config
 from infogami.infobase import client
@@ -21,18 +20,17 @@ from openlibrary.core import lending
 from openlibrary.plugins.upstream.utils import MultiDict, parse_toc, get_edition_config
 from openlibrary.plugins.upstream import account
 from openlibrary.plugins.upstream import borrow
-from openlibrary.plugins.worksearch.code import works_by_author, sorted_work_editions
+from openlibrary.plugins.worksearch.code import works_by_author
 from openlibrary.plugins.worksearch.search import get_solr
 
 from openlibrary.utils import dateutil
 from openlibrary.utils.isbn import isbn_10_to_isbn_13, isbn_13_to_isbn_10
-
-import six
+from openlibrary.utils.lccn import normalize_lccn
 
 
 def follow_redirect(doc):
     if isinstance(doc, str) and doc.startswith("/a/"):
-        # Some edition records have authors as ["/a/OL1A""] insead of [{"key": "/a/OL1A"}].
+        # Some edition records have authors as ["/a/OL1A""] instead of [{"key": "/a/OL1A"}].
         # Hack to fix it temporarily.
         doc = web.ctx.site.get(doc.replace("/a/", "/authors/"))
 
@@ -63,38 +61,6 @@ class Edition(models.Edition):
         authors = [a for a in authors if a and a.type.key == "/type/author"]
         return authors
 
-    def get_next(self):
-        """Next edition of work"""
-        if len(self.get('works', [])) != 1:
-            return
-        wkey = self.works[0].get_olid()
-        if not wkey:
-            return
-        editions = sorted_work_editions(wkey)
-        try:
-            i = editions.index(self.get_olid())
-        except ValueError:
-            return
-        if i + 1 == len(editions):
-            return
-        return editions[i + 1]
-
-    def get_prev(self):
-        """Previous edition of work"""
-        if len(self.get('works', [])) != 1:
-            return
-        wkey = self.works[0].get_olid()
-        if not wkey:
-            return
-        editions = sorted_work_editions(wkey)
-        try:
-            i = editions.index(self.get_olid())
-        except ValueError:
-            return
-        if i == 0:
-            return
-        return editions[i - 1]
-
     def get_covers(self):
         """
         This methods excludes covers that are -1 or None, which are in the data
@@ -107,14 +73,13 @@ class Edition(models.Edition):
         return covers and covers[0] or None
 
     def get_cover_url(self, size):
-        cover = self.get_cover()
-        if cover:
+        if cover := self.get_cover():
             return cover.url(size)
         elif self.ocaid:
             return self.get_ia_cover(self.ocaid, size)
 
     def get_ia_cover(self, itemid, size):
-        image_sizes = dict(S=(116, 58), M=(180, 360), L=(500, 500))
+        image_sizes = {"S": (116, 58), "M": (180, 360), "L": (500, 500)}
         w, h = image_sizes[size.upper()]
         return f"https://archive.org/download/{itemid}/page/cover_w{w}_h{h}.jpg"
 
@@ -137,6 +102,15 @@ class Edition(models.Edition):
             isbn_10 = self.isbn_10 and self.isbn_10[0]
             return isbn_10 and isbn_10_to_isbn_13(isbn_10)
         return isbn_13
+
+    def get_isbnmask(self):
+        """Returns a masked (hyphenated) ISBN if possible."""
+        isbns = self.get('isbn_13', []) + self.get('isbn_10', [None])
+        try:
+            isbn = mask(isbns[0])
+        except NotValidISBNError:
+            return isbns[0]
+        return isbn or isbns[0]
 
     def get_identifiers(self):
         """Returns (name, value) pairs of all available identifiers."""
@@ -251,7 +225,6 @@ class Edition(models.Edition):
         return self._get_available_loans([])
 
     def _get_available_loans(self, current_loans):
-
         default_type = 'bookreader'
 
         loans = []
@@ -305,9 +278,9 @@ class Edition(models.Edition):
         if self.ocaid:
             lending.sync_loan(self.ocaid)
 
-    def _process_identifiers(self, config, names, values):
+    def _process_identifiers(self, config_, names, values):
         id_map = {}
-        for id in config:
+        for id in config_:
             id_map[id.name] = id
             id.setdefault("label", id.name)
             id.setdefault("url_format", None)
@@ -356,7 +329,11 @@ class Edition(models.Edition):
             if 'name' not in id or 'value' not in id:
                 continue
             name, value = id['name'], id['value']
-            d.setdefault(name, []).append(value)
+            if name == 'lccn':
+                value = normalize_lccn(value)
+            # `None` in this field causes errors. See #7999.
+            if value is not None:
+                d.setdefault(name, []).append(value)
 
         # clear existing value first
         for name in names:
@@ -423,7 +400,7 @@ class Edition(models.Edition):
 
     def get_toc_text(self):
         def format_row(r):
-            return "*" * r.level + " " + " | ".join([r.label, r.title, r.pagenum])
+            return f"{'*' * r.level} {r.label} | {r.title} | {r.pagenum}"
 
         return "\n".join(format_row(r) for r in self.get_table_of_contents())
 
@@ -463,47 +440,40 @@ class Edition(models.Edition):
     @property
     def wp_citation_fields(self):
         """
-        Builds a wikipedia citation as defined by http://en.wikipedia.org/wiki/Template:Cite#Citing_books
+        Builds a Wikipedia book citation as defined by https://en.wikipedia.org/wiki/Template:Cite_book
         """
-        result = {
-            "title": self.title.replace("[", "&#91").replace("]", "&#93"),
-            "publication-date": self.get('publish_date'),
-            "ol": str(self.get_olid())[2:],
-        }
-
-        if self.ocaid:
-            result['url'] = "https://archive.org/details/" + self.ocaid
-
-        if self.lccn:
-            result['lccn'] = self.lccn[0]
-
-        if self.issn:
-            result['issn'] = self.issn[0]
-
-        if self.get('isbn_10'):
-            result['isbn'] = (
-                self['isbn_13'][0] if self.get('isbn_13') else self['isbn_10'][0]
-            )
-
-        if self.get('oclc_numbers'):
-            result['oclc'] = self.oclc_numbers[0]
-
-        if self.works[0].get('first_publish_year'):
-            result['origyear'] = self.works[0]['first_publish_year']
-
-        if self.get('publishers'):
-            result['publisher'] = self['publishers'][0]
-
-        if self.get('publish_places'):
-            result['publication-place'] = self['publish_places'][0]
-
+        citation = {}
         authors = [ar.author for ar in self.works[0].authors]
         if len(authors) == 1:
-            result['author'] = authors[0].name
+            citation['author'] = authors[0].name
         else:
-            for i, a in enumerate(authors):
-                result['author%s' % (i + 1)] = a.name
-        return result
+            for i, a in enumerate(authors, 1):
+                citation[f'author{i}'] = a.name
+
+        citation.update(
+            {
+                'date': self.get('publish_date'),
+                'orig-date': self.works[0].get('first_publish_date'),
+                'title': self.title.replace("[", "&#91").replace("]", "&#93"),
+                'url': f'https://archive.org/details/{self.ocaid}'
+                if self.ocaid
+                else None,
+                'publication-place': self.get('publish_places', [None])[0],
+                'publisher': self.get('publishers', [None])[0],
+                'isbn': self.get_isbnmask(),
+                'issn': self.get('identifiers', {}).get('issn', [None])[0],
+            }
+        )
+
+        if self.lccn and (lccn := normalize_lccn(self.lccn[0])):
+            citation['lccn'] = lccn
+        if self.get('oclc_numbers'):
+            citation['oclc'] = self.oclc_numbers[0]
+        citation['ol'] = str(self.get_olid())[2:]
+        # TODO: add 'ol-access': 'free' if the item is free to read.
+        if citation['date'] == citation['orig-date']:
+            citation.pop('orig-date')
+        return citation
 
     def is_fake_record(self):
         """Returns True if this is a record is not a real record from database,
@@ -513,6 +483,14 @@ class Edition(models.Edition):
         created at runtime using the data from archive.org metadata API.
         """
         return "/ia:" in self.key
+
+    def set_provider_data(self, data):
+        if not self.providers:
+            self.providers = []
+        self.providers.append(data)
+
+    def set_providers(self, providers):
+        self.providers = providers
 
 
 class Author(models.Author):
@@ -533,7 +511,7 @@ class Author(models.Author):
     def get_books(self, q=''):
         i = web.input(sort='editions', page=1, rows=20, mode="")
         try:
-            # safegaurd from passing zero/negative offsets to solr
+            # safeguard from passing zero/negative offsets to solr
             page = max(1, int(i.page))
         except ValueError:
             page = 1
@@ -544,6 +522,7 @@ class Author(models.Author):
             rows=i.rows,
             has_fulltext=i.mode == "ebooks",
             query=q,
+            facet=True,
         )
 
     def get_work_count(self):
@@ -603,7 +582,9 @@ class Work(models.Work):
     @cached_property
     def _solr_data(self):
         from openlibrary.book_providers import get_solr_keys
+
         fields = [
+            "key",
             "cover_edition_key",
             "cover_id",
             "edition_key",
@@ -697,7 +678,7 @@ class Work(models.Work):
                     not filter_unicode
                     or (subject.replace(' ', '').isalnum() and is_ascii(subject))
                 )
-                and all([char not in subject for char in blacklist_chars])
+                and all(char not in subject for char in blacklist_chars)
             ):
                 ok_subjects.append(subject)
         return ok_subjects
@@ -705,27 +686,30 @@ class Work(models.Work):
     def get_related_books_subjects(self, filter_unicode=True):
         return self.filter_problematic_subjects(self.get_subjects(), filter_unicode)
 
-    def get_representative_edition(self):
+    def get_representative_edition(self) -> str | None:
         """When we have confidence we can direct patrons to the best edition
         of a work (for them), return qualifying edition key. Attempts
         to find best (most available) edition of work using
         archive.org work availability API. May be extended to support language
 
-        :rtype str: infogami edition key or url which resolves to an edition
+        :rtype str: infogami edition key or url which resolves to an edition or None
         """
         work_id = self.key.replace('/works/', '')
         availability = lending.get_work_availability(work_id)
-        if work_id in availability:
-            if 'openlibrary_edition' in availability[work_id]:
-                return '/books/%s' % availability[work_id]['openlibrary_edition']
+        if ol_edition := availability.get(work_id, {}).get('openlibrary_edition'):
+            return f'/books/{ol_edition}'
 
-    def get_sorted_editions(self, ebooks_only=False, limit=None, keys=None):
+        return None
+
+    def get_sorted_editions(
+        self,
+        ebooks_only: bool = False,
+        limit: int | None = None,
+        keys: list[str] | None = None,
+    ) -> list[Edition]:
         """
         Get this work's editions sorted by publication year
-        :param bool ebooks_only:
-        :param int limit:
         :param list[str] keys: ensure keys included in fetched editions
-        :rtype: list[Edition]
         """
         db_query = {"type": "/type/edition", "works": self.key}
         db_query['limit'] = limit or 10000
@@ -734,6 +718,7 @@ class Work(models.Work):
         if ebooks_only:
             if self._solr_data:
                 from openlibrary.book_providers import get_book_providers
+
                 # Always use solr data whether it's up to date or not
                 # to determine which providers this book has
                 # We only make additional queries when a
@@ -855,6 +840,9 @@ class User(models.User):
         for loan in loans:
             lending.sync_loan(loan['ocaid'])
 
+    def get_safe_mode(self):
+        return (self.get_users_settings() or {}).get('safe_mode', "").lower()
+
 
 class UnitParser:
     """Parsers values like dimensions and weight.
@@ -958,6 +946,25 @@ class MergeAuthors(Changeset):
         ]
 
 
+class MergeWorks(Changeset):
+    def can_undo(self):
+        return self.get_undo_changeset() is None
+
+    def get_master(self):
+        master = self.data.get("master")
+        return master and web.ctx.site.get(master, lazy=True)
+
+    def get_duplicates(self):
+        duplicates = self.data.get("duplicates")
+        changes = {c['key']: c['revision'] for c in self.changes}
+
+        return duplicates and [
+            web.ctx.site.get(key, revision=changes[key] - 1, lazy=True)
+            for key in duplicates
+            if key in changes
+        ]
+
+
 class Undo(Changeset):
     def can_undo(self):
         return False
@@ -1008,6 +1015,12 @@ class ListChangeset(Changeset):
         return models.Seed(self.get_list(), seed)
 
 
+class Tag(models.Tag):
+    """Class to represent /type/tag objects in Open Library."""
+
+    pass
+
+
 def setup():
     models.register_models()
 
@@ -1019,9 +1032,11 @@ def setup():
     client.register_thing_class('/type/place', SubjectPlace)
     client.register_thing_class('/type/person', SubjectPerson)
     client.register_thing_class('/type/user', User)
+    client.register_thing_class('/type/tag', Tag)
 
     client.register_changeset_class(None, Changeset)  # set the default class
     client.register_changeset_class('merge-authors', MergeAuthors)
+    client.register_changeset_class('merge-works', MergeWorks)
     client.register_changeset_class('undo', Undo)
 
     client.register_changeset_class('add-book', AddBookChangeset)

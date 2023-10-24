@@ -3,7 +3,6 @@
 import web
 
 from openlibrary.core.processors import ReadableUrlProcessor
-import six
 
 from openlibrary.core import helpers as h
 
@@ -60,10 +59,9 @@ class CORSProcessor:
     def is_cors_path(self):
         if self.cors_prefixes is None or web.ctx.path.endswith(".json"):
             return True
-        for path_segment in self.cors_prefixes:
-            if web.ctx.path.startswith(path_segment):
-                return True
-        return False
+        return any(
+            web.ctx.path.startswith(path_segment) for path_segment in self.cors_prefixes
+        )
 
     def add_cors_headers(self):
         # Allow anyone to access GET and OPTIONS requests
@@ -73,7 +71,16 @@ class CORSProcessor:
             if web.ctx.path.startswith(p):
                 allowed = "OPTIONS"
 
-        web.header("Access-Control-Allow-Origin", "*")
+        if (
+            web.ctx.path == "/account/login.json"
+            and web.input(auth_provider="").auth_provider == "archive"
+        ):
+            allowed += ", POST"
+            web.header('Access-Control-Allow-Credentials', 'true')
+            web.header("Access-Control-Allow-Origin", "https://archive.org")
+        else:
+            web.header("Access-Control-Allow-Origin", "*")
+
         web.header("Access-Control-Allow-Method", allowed)
         web.header("Access-Control-Max-Age", 3600 * 24)  # one day
 

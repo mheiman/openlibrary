@@ -1,7 +1,12 @@
-import web
-import logging
+from datetime import datetime
 import json
+import logging
 import re
+from typing import Any
+from collections.abc import Callable
+from collections.abc import Iterable, Mapping
+
+import web
 
 from infogami.utils import delegate
 from infogami import config
@@ -11,15 +16,19 @@ from infogami.utils.view import (
     render_template,
     add_flash_message,
 )
-
 from infogami.infobase.client import ClientException
-from infogami.utils.context import context
 import infogami.core.code as core
 
 from openlibrary import accounts
 from openlibrary.i18n import gettext as _
+from openlibrary.core import stats
 from openlibrary.core import helpers as h, lending
+from openlibrary.core.booknotes import Booknotes
 from openlibrary.core.bookshelves import Bookshelves
+from openlibrary.core.helpers import days_since
+from openlibrary.core.lending import s3_loan_api
+from openlibrary.core.observations import Observations
+from openlibrary.core.ratings import Ratings
 from openlibrary.plugins.recaptcha import recaptcha
 from openlibrary.plugins.upstream.mybooks import MyBooksTemplate
 from openlibrary.plugins import openlibrary as olib
@@ -31,9 +40,7 @@ from openlibrary.accounts import (
     valid_email,
 )
 from openlibrary.plugins.upstream import borrow, forms, utils
-
-from six.moves import urllib
-
+from openlibrary.utils.dateutil import elapsed_time
 
 logger = logging.getLogger("openlibrary.account")
 
@@ -132,9 +139,7 @@ class internal_audit(delegate.page):
                     email=i.email, link=i.itemname, username=i.username
                 )
                 if result is None:
-                    raise ValueError(
-                        'Invalid Open Library account email ' 'or itemname'
-                    )
+                    raise ValueError('Invalid Open Library account email or itemname')
                 result.enc_password = 'REDACTED'
                 if i.new_itemname:
                     result.link(i.new_itemname)
@@ -147,7 +152,6 @@ class internal_audit(delegate.page):
 
 
 class account_migration(delegate.page):
-
     path = "/internal/account/migration"
 
     def GET(self):
@@ -241,10 +245,7 @@ class account_create(delegate.page):
         f = self.get_form()
         return render['account/create'](f)
 
-    def get_form(self):
-        """
-        :rtype: forms.RegisterForm
-        """
+    def get_form(self) -> forms.RegisterForm:
         f = forms.Register()
         recap = self.get_recap()
         f.has_recaptcha = recap is not None
@@ -303,7 +304,6 @@ del delegate.pages['/account/register']
 
 
 class account_login_json(delegate.page):
-
     encoding = "json"
     path = "/account/login"
 
@@ -316,6 +316,8 @@ class account_login_json(delegate.page):
         from openlibrary.plugins.openlibrary.code import BadRequest
 
         d = json.loads(web.data())
+        email = d.get('email', "")
+        remember = d.get('remember', "")
         access = d.get('access', None)
         secret = d.get('secret', None)
         test = d.get('test', False)
@@ -333,7 +335,12 @@ class account_login_json(delegate.page):
             error = audit.get('error')
             if error:
                 raise olib.code.BadRequest(error)
+            expires = 3600 * 24 * 365 if remember.lower() == 'true' else ""
             web.setcookie(config.login_cookie_name, web.ctx.conn.get_auth_token())
+            if audit.get('ia_email'):
+                ol_account = OpenLibraryAccount.get(email=audit['ia_email'])
+                if ol_account and ol_account.get_user().get_safe_mode() == 'yes':
+                    web.setcookie('sfw', 'yes', expires=expires)
         # Fallback to infogami user/pass
         else:
             from infogami.plugins.api.code import login as infogami_login
@@ -348,7 +355,7 @@ class account_login(delegate.page):
 
     * account_not_found: Error message is displayed.
     * account_bad_password: Error message is displayed with a link to reset password.
-    * account_not_verified: Error page is dispalyed with button to "resend verification email".
+    * account_not_verified: Error page is displayed with button to "resend verification email".
     """
 
     path = "/account/login"
@@ -362,8 +369,7 @@ class account_login(delegate.page):
     def GET(self):
         referer = web.ctx.env.get('HTTP_REFERER', '')
         # Don't set referer if request is from offsite
-        if ('openlibrary.org' not in referer
-            or referer.endswith('openlibrary.org/')):
+        if 'openlibrary.org' not in referer or referer.endswith('openlibrary.org/'):
             referer = None
         i = web.input(redirect=referer)
         f = forms.Login()
@@ -386,12 +392,11 @@ class account_login(delegate.page):
             email,
             i.password,
             require_link=True,
-            s3_access_key=i.access,
-            s3_secret_key=i.secret,
+            s3_access_key=i.access or web.ctx.env.get('HTTP_X_S3_ACCESS'),
+            s3_secret_key=i.secret or web.ctx.env.get('HTTP_X_S3_SECRET'),
             test=i.test,
         )
-        error = audit.get('error')
-        if error:
+        if error := audit.get('error'):
             return self.render_error(error, i)
 
         expires = 3600 * 24 * 365 if i.remember else ""
@@ -399,12 +404,20 @@ class account_login(delegate.page):
         web.setcookie(
             config.login_cookie_name, web.ctx.conn.get_auth_token(), expires=expires
         )
+        ol_account = OpenLibraryAccount.get(email=email)
+
+        # Don't overwrite the cookie, which will contain banner display preferences
+        if not web.cookies().get('se', False):
+            self.set_screener_cookie(ol_account)
+
+        if ol_account and ol_account.get_user().get_safe_mode() == 'yes':
+            web.setcookie('sfw', 'yes', expires=expires)
         blacklist = [
             "/account/login",
             "/account/create",
         ]
-        if i.redirect == "" or any([path in i.redirect for path in blacklist]):
-            i.redirect = "/account/loans"
+        if i.redirect == "" or any(path in i.redirect for path in blacklist):
+            i.redirect = "/account/books"
         raise web.seeother(i.redirect)
 
     def POST_resend_verification_email(self, i):
@@ -425,6 +438,45 @@ class account_login(delegate.page):
         )
         return render.message(title, message)
 
+    def set_screener_cookie(self, account: OpenLibraryAccount):
+        if self.is_eligible_for_screener(account):
+            # `se` is "Survey eligible"
+            web.setcookie('se', '1', expires=(3600 * 24 * 30))  # Expires in 30 days
+
+    def is_eligible_for_screener(self, account: OpenLibraryAccount) -> bool:
+        # It is August 2023:
+        if (now := datetime.now()) and now.month != 9 and now.year != 2023:
+            return False
+
+        # Account must be at least 90 days old:
+        if days_since(account.creation_time()) < 90:
+            return False
+
+        # Account was created using a university's domain:
+        email = account.email
+        if not self.is_edu_domain(email):
+            return False
+
+        # Has borrowed at least three books:
+        if not self.has_borrowed_at_least(3, account.s3_keys):
+            return False
+
+        return True
+
+    def is_edu_domain(self, email: str) -> bool:
+        if not email or '@' not in email:
+            return False
+
+        domain = email.split('@')[-1]
+
+        sorted_edu_domains = utils.get_edu_domains()
+
+        return domain in sorted_edu_domains
+
+    def has_borrowed_at_least(self, amount: int, s3_keys) -> bool:
+        resp = s3_loan_api(s3_keys, action='user_borrow_history', limit=amount).json()
+        return len(resp) == amount
+
 
 class account_verify(delegate.page):
     """Verify user account."""
@@ -437,9 +489,8 @@ class account_verify(delegate.page):
             doc = docs[0]
 
             account = accounts.find(username=doc['username'])
-            if account:
-                if account['status'] != "pending":
-                    return render['account/verify/activated'](account)
+            if account and account['status'] != "pending":
+                return render['account/verify/activated'](account)
             account.activate()
             user = web.ctx.site.get("/people/" + doc['username'])  # TBD
             return render['account/verify/success'](account)
@@ -515,8 +566,7 @@ class account_email_verify(delegate.page):
     path = "/account/email/verify/([0-9a-f]*)"
 
     def GET(self, code):
-        link = accounts.get_link(code)
-        if link:
+        if link := accounts.get_link(code):
             username = link['username']
             email = link['email']
             link.delete()
@@ -639,7 +689,6 @@ class account_password_forgot(delegate.page):
 
 
 class account_password_reset(delegate.page):
-
     path = "/account/password/reset/([0-9a-f]*)"
 
     def GET(self, code):
@@ -668,7 +717,6 @@ class account_password_reset(delegate.page):
 
 
 class account_audit(delegate.page):
-
     path = "/account/audit"
 
     def POST(self):
@@ -699,8 +747,14 @@ class account_privacy(delegate.page):
 
     @require_login
     def POST(self):
+        i = web.input(public_readlog="", safe_mode="")
         user = accounts.get_current_user()
-        user.save_preferences(web.input())
+        if user.get_safe_mode() != 'yes' and i.safe_mode == 'yes':
+            stats.increment('ol.account.safe_mode')
+        user.save_preferences(i)
+        web.setcookie(
+            'sfw', i.safe_mode, expires="" if i.safe_mode.lower() == 'yes' else -1
+        )
         add_flash_message(
             'note', _("Notification preferences have been updated successfully.")
         )
@@ -754,7 +808,7 @@ class account_my_books(delegate.page):
     def GET(self):
         user = accounts.get_current_user()
         username = user.key.split('/')[-1]
-        raise web.seeother('/people/%s/books' % (username))
+        raise web.seeother(f'/people/{username}/books')
 
 
 # This would be by the civi backend which would require the api keys
@@ -803,30 +857,219 @@ class fetch_goodreads(delegate.page):
         return render['account/import'](books, books_wo_isbns)
 
 
+def csv_header_and_format(row: Mapping[str, Any]) -> tuple[str, str]:
+    """
+    Convert the keys of a dict into csv header and format strings for generating a
+    comma separated values string.  This will only be run on the first row of data.
+    >>> csv_header_and_format({"item_zero": 0, "one_id_id": 1, "t_w_o": 2, "THREE": 3})
+    ('Item Zero,One Id ID,T W O,Three', '{item_zero},{one_id_id},{t_w_o},{THREE}')
+    """
+    return (  # The .replace("_Id,", "_ID,") converts "Edition Id" --> "Edition ID"
+        ",".join(fld.replace("_", " ").title() for fld in row).replace(" Id,", " ID,"),
+        ",".join("{%s}" % field for field in row),
+    )
+
+
+@elapsed_time("csv_string")
+def csv_string(source: Iterable[Mapping], row_formatter: Callable | None = None) -> str:
+    """
+    Given a list of dicts, generate comma-separated values where each dict is a row.
+    An optional reformatter function can be provided to transform or enrich each dict.
+    The order and names of the formatter's output dict keys will determine the order
+    and header column titles of the resulting csv string.
+    :param source: An iterable of all the rows that should appear in the csv string.
+    :param formatter: A Callable that accepts a Mapping and returns a dict.
+    >>> csv = csv_string([{"row_id": x, "t w o": 2, "upper": x.upper()} for x in "ab"])
+    >>> csv.splitlines()
+    ['Row ID,T W O,Upper', 'a,2,A', 'b,2,B']
+    """
+    if not row_formatter:  # The default formatter reuses the inbound dict unmodified
+
+        def row_formatter(row: Mapping) -> Mapping:
+            return row
+
+    def csv_body() -> Iterable[str]:
+        """
+        On the first row, use csv_header_and_format() to get and yield the csv_header.
+        Then use csv_format to yield each row as a string of comma-separated values.
+        """
+        assert row_formatter, "Placate mypy."
+        for i, row in enumerate(source):
+            if i == 0:  # Only on first row, make header and format from the dict keys
+                csv_header, csv_format = csv_header_and_format(row_formatter(row))
+                yield csv_header
+            yield csv_format.format(**row_formatter(row))
+
+    return '\n'.join(csv_body())
+
+
 class export_books(delegate.page):
     path = "/account/export"
 
+    date_format = '%Y-%m-%d %H:%M:%S'
+
     @require_login
     def GET(self):
+        i = web.input(type='')
+        filename = ''
+
         user = accounts.get_current_user()
         username = user.key.split('/')[-1]
-        books = Bookshelves.get_users_logged_books(username, limit=10000)
-        csv = []
-        csv.append('Work Id,Edition Id,Bookshelf\n')
-        mapping = {1: 'Want to Read', 2: 'Currently Reading', 3: 'Already Read'}
-        for book in books:
-            row = [
-                'OL{}W'.format(book['work_id']),
-                'OL{}M'.format(book['edition_id']) if book['edition_id'] else '',
-                '{}\n'.format(mapping[book['bookshelf_id']]),
-            ]
-            csv.append(','.join(row))
+
+        if i.type == 'reading_log':
+            data = self.generate_reading_log(username)
+            filename = 'OpenLibrary_ReadingLog.csv'
+        elif i.type == 'book_notes':
+            data = self.generate_book_notes(username)
+            filename = 'OpenLibrary_BookNotes.csv'
+        elif i.type == 'reviews':
+            data = self.generate_reviews(username)
+            filename = 'OpenLibrary_Reviews.csv'
+        elif i.type == 'lists':
+            with elapsed_time("user.get_lists()"):
+                lists = user.get_lists(limit=1000)
+            with elapsed_time("generate_list_overview()"):
+                data = self.generate_list_overview(lists)
+            filename = 'Openlibrary_ListOverview.csv'
+        elif i.type == 'ratings':
+            data = self.generate_star_ratings(username)
+            filename = 'OpenLibrary_Ratings.csv'
+
         web.header('Content-Type', 'text/csv')
-        web.header(
-            'Content-disposition', 'attachment; filename=OpenLibrary_ReadingLog.csv'
-        )
-        csv = ''.join(csv)
-        return delegate.RawText(csv, content_type="text/csv")
+        web.header('Content-disposition', f'attachment; filename={filename}')
+        return delegate.RawText('' or data, content_type="text/csv")
+
+    def generate_reading_log(self, username: str) -> str:
+        from openlibrary.plugins.upstream.models import Work  # Avoid a circular import
+
+        bookshelf_map = {1: 'Want to Read', 2: 'Currently Reading', 3: 'Already Read'}
+
+        def get_subjects(work: Work, subject_type: str) -> str:
+            return " | ".join(s.title for s in work.get_subject_links(subject_type))
+
+        def escape_csv_field(raw_string: str) -> str:
+            """
+            Formats given CVS field string such that it conforms to definition outlined
+            in RFC #4180.
+
+            Note: We should probably use
+            https://docs.python.org/3/library/csv.html
+            """
+            escaped_string = raw_string.replace('"', '""')
+            return f'"{escaped_string}"'
+
+        def format_reading_log(book: dict) -> dict:
+            """
+            Adding, deleting, renaming, or reordering the fields of the dict returned
+            below will automatically be reflected in the CSV that is generated.
+            """
+            work_key = f"/works/OL{book['work_id']}W"
+            work: Work = web.ctx.site.get(work_key)
+            if not work:
+                raise ValueError(f"No Work found for {work_key}.")
+            if work.type.key == '/type/redirect':
+                # Fetch actual work and resolve redirects before exporting:
+                work = web.ctx.site.get(work.location)
+                work.resolve_redirect_chain(work_key)
+            if edition_id := book.get("edition_id") or "":
+                edition_id = f"OL{edition_id}M"
+            ratings = work.get_rating_stats() or {"average": "", "count": ""}
+            ratings_average, ratings_count = ratings.values()
+            return {
+                "work_id": work_key.split("/")[-1],
+                "title": escape_csv_field(work.title),
+                "authors": escape_csv_field(" | ".join(work.get_author_names())),
+                "first_publish_year": work.first_publish_year,
+                "edition_id": edition_id,
+                "edition_count": work.edition_count,
+                "bookshelf": bookshelf_map[work.get_users_read_status(username)],
+                "my_ratings": work.get_users_rating(username) or "",
+                "ratings_average": ratings_average,
+                "ratings_count": ratings_count,
+                "has_ebook": work.has_ebook(),
+                "subjects": escape_csv_field(
+                    get_subjects(work=work, subject_type="subject")
+                ),
+                "subject_people": escape_csv_field(
+                    get_subjects(work=work, subject_type="person")
+                ),
+                "subject_places": escape_csv_field(
+                    get_subjects(work=work, subject_type="place")
+                ),
+                "subject_times": escape_csv_field(
+                    get_subjects(work=work, subject_type="time")
+                ),
+            }
+
+        books = Bookshelves.iterate_users_logged_books(username)
+        return csv_string(books, format_reading_log)
+
+    def generate_book_notes(self, username: str) -> str:
+        def format_booknote(booknote: Mapping) -> dict:
+            escaped_note = booknote['notes'].replace('"', '""')
+            return {
+                "work_id": f"OL{booknote['work_id']}W",
+                "edition_id": f"OL{booknote['edition_id']}M",
+                "note": f'"{escaped_note}"',
+                "created_on": booknote['created'].strftime(self.date_format),
+            }
+
+        return csv_string(Booknotes.select_all_by_username(username), format_booknote)
+
+    def generate_reviews(self, username: str) -> str:
+        def format_observation(observation: Mapping) -> dict:
+            return {
+                "work_id": f"OL{observation['work_id']}W",
+                "review_category": f'"{observation["observation_type"]}"',
+                "review_value": f'"{observation["observation_value"]}"',
+                "created_on": observation['created'].strftime(self.date_format),
+            }
+
+        observations = Observations.select_all_by_username(username)
+        return csv_string(observations, format_observation)
+
+    def generate_list_overview(self, lists):
+        row = {
+            "list_id": "",
+            "list_name": "",
+            "list_description": "",
+            "entry": "",
+            "created_on": "",
+            "last_updated": "",
+        }
+
+        def lists_as_csv(lists) -> Iterable[str]:
+            for i, list in enumerate(lists):
+                if i == 0:  # Only on first row, make header and format from dict keys
+                    csv_header, csv_format = csv_header_and_format(row)
+                    yield csv_header
+                row["list_id"] = list.key.split('/')[-1]
+                row["list_name"] = (list.name or '').replace('"', '""')
+                row["list_description"] = (list.description or '').replace('"', '""')
+                row["created_on"] = list.created.strftime(self.date_format)
+                if (last_updated := list.last_modified or "") and isinstance(
+                    last_updated, datetime
+                ):  # placate mypy
+                    last_updated = last_updated.strftime(self.date_format)
+                row["last_updated"] = last_updated
+                for seed in list.seeds:
+                    row["entry"] = seed if isinstance(seed, str) else seed.key
+                    yield csv_format.format(**row)
+
+        return "\n".join(lists_as_csv(lists))
+
+    def generate_star_ratings(self, username: str) -> str:
+        def format_rating(rating: Mapping) -> dict:
+            if edition_id := rating.get("edition_id") or "":
+                edition_id = f"OL{edition_id}M"
+            return {
+                "Work ID": f"OL{rating['work_id']}W",
+                "Edition ID": edition_id,
+                "Rating": f"{rating['rating']}",
+                "Created On": rating['created'].strftime(self.date_format),
+            }
+
+        return csv_string(Ratings.select_all_by_username(username), format_rating)
 
 
 class account_loans(delegate.page):
@@ -842,7 +1085,6 @@ class account_loans(delegate.page):
 
 
 class account_loans_json(delegate.page):
-
     encoding = "json"
     path = "/account/loans"
 
@@ -858,17 +1100,13 @@ class account_loans_json(delegate.page):
 class account_waitlist(delegate.page):
     path = "/account/waitlist"
 
-    @require_login
     def GET(self):
-        user = accounts.get_current_user()
-        username = user['key'].split('/')[-1]
-
-        return MyBooksTemplate(username, 'waitlist').render()
+        raise web.seeother("/account/loans")
 
 
-# Disabling be cause it prevents account_my_books_redirect from working
-# for some reason. The purpose of this class is to not show the "Create" link for
-# /account pages since that doesn't make any sense.
+# Disabling because it prevents account_my_books_redirect from working for some reason.
+# The purpose of this class is to not show the "Create" link for /account pages since
+# that doesn't make any sense.
 # class account_others(delegate.page):
 #     path = "(/account/.*)"
 #
@@ -877,7 +1115,7 @@ class account_waitlist(delegate.page):
 
 
 def send_forgot_password_email(username, email):
-    key = "account/%s/password" % username
+    key = f"account/{username}/password"
 
     doc = create_link_doc(key, username, email)
     web.ctx.site.store[key] = doc

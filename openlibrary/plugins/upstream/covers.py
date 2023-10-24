@@ -3,16 +3,18 @@
 from logging import getLogger
 
 import requests
-import six
 import web
-from six import BytesIO
+from io import BytesIO
 
 from infogami.utils import delegate
 from infogami.utils.view import safeint
 from openlibrary import accounts
 from openlibrary.plugins.upstream.models import Image
 from openlibrary.plugins.upstream.utils import (
-    get_coverstore_url, get_coverstore_public_url, render_template)
+    get_coverstore_url,
+    get_coverstore_public_url,
+    render_template,
+)
 
 logger = getLogger("openlibrary.plugins.upstream.covers")
 
@@ -34,15 +36,20 @@ class add_cover(delegate.page):
         if not book:
             raise web.notfound("")
 
+        user = accounts.get_current_user()
+        if user and user.is_read_only():
+            raise web.forbidden(message="Patron not permitted to upload images")
+
         i = web.input(file={}, url="")
 
         # remove references to field storage objects
         web.ctx.pop("_fieldstorage", None)
 
         data = self.upload(key, i)
-        coverid = data.get('id')
 
-        if coverid:
+        if coverid := data.get('id'):
+            if isinstance(i.url, bytes):
+                i.url = i.url.decode("utf-8")
             self.save(book, coverid, url=i.url)
             cover = Image(web.ctx.site, "b", coverid)
             return render_template("covers/saved", cover)
@@ -84,9 +91,11 @@ class add_cover(delegate.page):
 
     def save(self, book, coverid, url=None):
         book.covers = [coverid] + [cover.id for cover in book.get_covers()]
-        book._save('{}/b/id/{}-S.jpg'.format(
-            get_coverstore_public_url(), coverid),
-            action="add-cover", data={"url": url})
+        book._save(
+            f'{get_coverstore_public_url()}/b/id/{coverid}-S.jpg',
+            action="add-cover",
+            data={"url": url},
+        )
 
 
 class add_work_cover(add_cover):

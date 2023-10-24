@@ -54,8 +54,7 @@ class contact(delegate.page):
                 )
 
         default_assignees = config.get("support_default_assignees", {})
-        topic_key = str(topic.replace(" ", "_").lower())
-        if topic_key in default_assignees:
+        if (topic_key := str(topic.replace(" ", "_").lower())) in default_assignees:
             assignee = default_assignees.get(topic_key)
         else:
             assignee = default_assignees.get("default", "openlibrary@archive.org")
@@ -76,18 +75,10 @@ class contact(delegate.page):
 def sendmail(from_address, to_address, subject, message):
     if config.get('dummy_sendmail'):
         msg = (
-            ''
-            + 'To: '
-            + to_address
-            + '\n'
-            + 'From:'
-            + from_address
-            + '\n'
-            + 'Subject:'
-            + subject
-            + '\n'
-            + '\n'
-            + web.safestr(message)
+            f'To: {to_address}\n'
+            f'From:{from_address}\n'
+            f'Subject:{subject}\n'
+            f'\n{web.safestr(message)}'
         )
 
         logger.info("sending email:\n%s", msg)
