@@ -1,0 +1,43 @@
+$def with (records, tags)
+
+$var title: $_("Bulk Edit Works")
+$putctx("robots", "noindex,nofollow")
+
+<div id="contentHead" class="editFormHead">
+    <h2 class="editFormTitle">$_("Bulk Edit Works")</h2>
+    $if ctx.user and (ctx.user.is_admin() or ctx.user.is_usergroup_member('/usergroup/super-librarians')):
+        <span class="adminOnly right">
+            <form method="post" id="delete-record" name="delete">
+                <button type="submit" name="_delete" value="true" id="delete-btn">$_("Delete Records")</button>
+            </form>
+        </span>
+    $if not ctx.user:
+        $:render_template("lib/not_logged")
+</div>
+
+<div id="contentBody">
+    <form method="post" id="bulkEdit" class="olform books validate" name="edit" action="">
+        <input type="hidden" name="work--key" value="${','.join([work['key'] for work in records])}">
+        <div id="about">
+            <div class="formBack">
+                <div class="formElement formBackLeft">
+                    <fieldset class="major">
+                        <p>Any subjects listed below are present on <em>all</em> the selected works.
+                        Deleting them here will remove them from <em>all</em> the selected works.
+                        Additional subjects on individual works will not be affected by changes made here.</p>
+                        $:render_template("books/edit/tags", tags)
+                    </fieldset>
+                </div>
+                <div class="formElement formBackRight">
+                    <div class="scrollingList">
+                        <ul>
+                        $for work in records:
+                            <li><a href="$work.key" target="_blank">$work.title</a></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+        $:macros.EditButtons(comment=work.comment_)
+    </form>
+</div>

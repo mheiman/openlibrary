@@ -536,6 +536,27 @@ def trim_doc(doc):
     return web.storage((k, trim_value(v)) for k, v in doc.items() if k[:1] not in "_{")
 
 
+def read_subject(subjects):
+    """
+    >>> list(read_subject("A,B,C,B")) == [u'A', u'B', u'C']   # str
+    True
+    >>> list(read_subject(r"A,B,C,B")) == [u'A', u'B', u'C']  # raw
+    True
+    >>> list(read_subject(u"A,B,C,B")) == [u'A', u'B', u'C']  # Unicode
+    True
+    >>> list(read_subject(""))
+    []
+    """
+    if not subjects:
+        return
+    f = io.StringIO(subjects.replace('\r\n', ''))
+    dedup = set()
+    for s in next(csv.reader(f, dialect='excel', skipinitialspace=True)):
+        if s.lower() not in dedup:
+            yield s
+            dedup.add(s.lower())
+
+
 class SaveBookHelper:
     """Helper to save edition and work using the form data coming from edition edit and work edit pages.
 
@@ -736,26 +757,6 @@ class SaveBookHelper:
         Process input data for work.
         :param web.storage work: form data work info
         """
-
-        def read_subject(subjects):
-            """
-            >>> list(read_subject("A,B,C,B")) == [u'A', u'B', u'C']   # str
-            True
-            >>> list(read_subject(r"A,B,C,B")) == [u'A', u'B', u'C']  # raw
-            True
-            >>> list(read_subject(u"A,B,C,B")) == [u'A', u'B', u'C']  # Unicode
-            True
-            >>> list(read_subject(""))
-            []
-            """
-            if not subjects:
-                return
-            f = io.StringIO(subjects.replace('\r\n', ''))
-            dedup = set()
-            for s in next(csv.reader(f, dialect='excel', skipinitialspace=True)):
-                if s.lower() not in dedup:
-                    yield s
-                    dedup.add(s.lower())
 
         work.subjects = list(read_subject(work.get('subjects', '')))
         work.subject_places = list(read_subject(work.get('subject_places', '')))
@@ -967,6 +968,81 @@ class work_edit(delegate.page):
         except (ClientException, ValidationException) as e:
             add_flash_message('error', str(e))
             return self.GET(key)
+
+
+def get_shared_tags(records):
+    tags = {}
+    for subject in ['subjects', 'subject_places', 'subject_times', 'subject_people']:
+        for work in records:
+            if subject in tags:
+                tags[subject] = tags[subject].intersection(set(work[subject]))
+            else:
+                tags[subject] = set(work[subject])
+        tags[subject] = list(tags[subject])
+    return tags
+
+
+class work_bulk_edit(delegate.page):
+    path = r"/works/bulk_edit"
+
+    def GET(self):
+        i = web.input(records='')
+        user = web.ctx.site.get_user()
+        has_access = user and (user.is_admin() or user.is_librarian())
+        if not has_access:
+            raise web.HTTPError('403 Forbidden')
+
+        olids = i.records.split(',')
+        works = []
+        for key in olids:
+            works.append(web.ctx.site.get('/works/%s' % key))
+
+        return render_template(
+            'books/bulk-edit', records=works, tags=get_shared_tags(works)
+        )
+
+    def POST(self):
+        i = web.input(_method="POST")
+
+        output = []
+        works = []
+        for key in i['work--key'].split(','):
+            works.append(web.ctx.site.get(key))
+        shared_tags = get_shared_tags(works)
+        changed_tags = {}
+        for subject in shared_tags:
+            form_subject = list(read_subject(i['work--%s' % subject]))
+            changed_tags[subject] = {}
+            changed_tags[subject]['remove'] = [
+                t for t in shared_tags[subject] if t not in form_subject
+            ]
+            changed_tags[subject]['add'] = [
+                t for t in form_subject if t not in shared_tags[subject]
+            ]
+
+        saveutil = DocSaveHelper()
+        for work in works:
+            changeset = {}
+            for subject in changed_tags:
+                if changed_tags[subject]['remove'] or changed_tags[subject]['add']:
+                    changeset[subject] = work[subject]
+                    changeset[subject].extend(changed_tags[subject]['add'])
+                    changeset[subject] = [
+                        tag
+                        for tag in changeset[subject]
+                        if tag not in changed_tags[subject]['remove']
+                    ]
+                    output.append(json.dumps(changeset[subject]))
+            try:
+                work.update(changeset)
+                saveutil.save(work)
+                output.append('%s updated' % work.title)
+            except (ClientException, ValidationException) as e:
+                output.append('%s UPDATE FAILED' % work.title)
+
+        comment = i.pop('_comment', '')
+        saveutil.commit(comment=comment, action="edit-book")
+        return render_template("message.html", "Test", json.dumps(output))
 
 
 class author_edit(delegate.page):

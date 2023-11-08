@@ -400,6 +400,13 @@ SelectionManager.ACTIONS = [
         onclick: olids => renderBulkTaggingMenu(olids),
     },
     {
+        applies_to_type: ['work'],
+        requires_type: ['work'],
+        multiple_only: true,
+        name: 'Bulk Edit...',
+        href: olids => `/works/bulk_edit?records=${olids.join(',')}`,
+    },
+    {
         applies_to_type: ['work','edition'],
         requires_type: ['work'],
         multiple_only: true,
