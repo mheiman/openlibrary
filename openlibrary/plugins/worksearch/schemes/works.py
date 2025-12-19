@@ -164,6 +164,11 @@ class WorkSearchScheme(SearchScheme):
             'currently_reading': 'currently_reading_count desc',
             'already_read': 'already_read_count desc',
             'title': 'title_sort asc',
+            'title asc': 'title_sort asc',
+            'title desc': 'title_sort desc',
+            'author': 'author_key asc',
+            'author asc': 'author_key asc',
+            'author desc': 'author_key desc',
             'scans': 'ia_count desc',
             # Classifications
             'lcc_sort': 'lcc_sort asc',
