@@ -1,17 +1,10 @@
+# OAuth2 Mobile Authentication Module
 """
-OAuth2 Module
+OpenLibrary OAuth2 Mobile Authentication
 
-This module provides OAuth2 authentication support for OpenLibrary.
+This module provides OAuth2 authentication support for mobile applications,
+including authorization code flow with PKCE and token management.
 """
 
-__version__ = "0.1.0"
-__author__ = "OpenLibrary Contributors"
-
-# Import OAuth2 components when they become available
-# from .client import OAuth2Client
-# from .provider import OAuth2Provider
-# from .utils import OAuth2Utils
-
-__all__ = [
-    # Add public API exports here
-]
+__version__ = "1.0.0"
+__all__ = ["MobileOAuth2Manager", "OAuth2Config"]
