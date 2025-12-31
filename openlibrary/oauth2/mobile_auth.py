@@ -1,435 +1,378 @@
 """
 OAuth2 Mobile Authentication Module
 
-This module provides OAuth2 authentication functionality for mobile applications,
-including authorization code flow, token exchange, and token refresh.
+This module provides OAuth2 authentication support for mobile applications,
+including authorization flow, token management, and secure credential handling.
 """
 
+import json
 import hashlib
 import secrets
-import time
-from typing import Dict, Optional, Tuple
+from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlencode, parse_qs, urlparse
-import logging
 from datetime import datetime, timedelta
-
-try:
-    import requests
-except ImportError:
-    requests = None
+from dataclasses import dataclass, asdict
+import logging
 
 logger = logging.getLogger(__name__)
 
 
-class OAuth2MobileAuth:
-    """
-    OAuth2 Mobile Authentication handler supporting the authorization code flow
-    and token management for mobile applications.
-    """
+@dataclass
+class TokenResponse:
+    """Represents an OAuth2 token response"""
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int = 3600
+    refresh_token: Optional[str] = None
+    scope: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert token response to dictionary"""
+        return {k: v for k, v in asdict(self).items() if v is not None}
+    
+    def is_expired(self, issued_at: Optional[datetime] = None) -> bool:
+        """Check if token is expired"""
+        if issued_at is None:
+            issued_at = datetime.utcnow()
+        expiration_time = issued_at + timedelta(seconds=self.expires_in)
+        return datetime.utcnow() >= expiration_time
 
-    def __init__(
-        self,
-        client_id: str,
-        client_secret: str,
-        redirect_uri: str,
-        auth_endpoint: str,
-        token_endpoint: str,
-        scopes: Optional[list] = None,
-    ):
+
+@dataclass
+class AuthorizationRequest:
+    """Represents an OAuth2 authorization request"""
+    client_id: str
+    redirect_uri: str
+    response_type: str = "code"
+    scope: Optional[str] = None
+    state: Optional[str] = None
+    code_challenge: Optional[str] = None
+    code_challenge_method: Optional[str] = None
+    
+    def to_query_params(self) -> str:
+        """Convert to URL query parameters"""
+        params = {k: v for k, v in asdict(self).items() if v is not None}
+        return urlencode(params)
+
+
+class PKCEFlow:
+    """
+    Implements PKCE (Proof Key for Public Clients) flow
+    for secure mobile authentication without requiring client secret
+    """
+    
+    CHALLENGE_METHOD_S256 = "S256"
+    CHALLENGE_METHOD_PLAIN = "plain"
+    
+    @staticmethod
+    def generate_code_verifier(length: int = 128) -> str:
         """
-        Initialize OAuth2 Mobile Authentication handler.
+        Generate a cryptographically secure code verifier
+        
+        Args:
+            length: Length of the verifier (between 43 and 128)
+            
+        Returns:
+            A URL-safe random string
+        """
+        if not (43 <= length <= 128):
+            raise ValueError("Code verifier length must be between 43 and 128")
+        return secrets.token_urlsafe(length)
+    
+    @staticmethod
+    def generate_code_challenge(code_verifier: str, method: str = CHALLENGE_METHOD_S256) -> Tuple[str, str]:
+        """
+        Generate code challenge from verifier
+        
+        Args:
+            code_verifier: The code verifier string
+            method: The challenge method (S256 or plain)
+            
+        Returns:
+            Tuple of (code_challenge, method)
+        """
+        if method == PKCEFlow.CHALLENGE_METHOD_S256:
+            challenge = hashlib.sha256(code_verifier.encode()).digest()
+            code_challenge = __import__('base64').urlsafe_b64encode(challenge).decode().rstrip('=')
+            return code_challenge, method
+        elif method == PKCEFlow.CHALLENGE_METHOD_PLAIN:
+            return code_verifier, method
+        else:
+            raise ValueError(f"Unknown challenge method: {method}")
+    
+    @staticmethod
+    def verify_code_challenge(code_verifier: str, code_challenge: str, method: str) -> bool:
+        """
+        Verify that a code verifier matches a code challenge
+        
+        Args:
+            code_verifier: The code verifier to verify
+            code_challenge: The code challenge to verify against
+            method: The challenge method used
+            
+        Returns:
+            True if verification succeeds
+        """
+        if method == PKCEFlow.CHALLENGE_METHOD_S256:
+            computed_challenge, _ = PKCEFlow.generate_code_challenge(code_verifier, method)
+            return computed_challenge == code_challenge
+        elif method == PKCEFlow.CHALLENGE_METHOD_PLAIN:
+            return code_verifier == code_challenge
+        else:
+            return False
 
+
+class MobileAuthClient:
+    """
+    OAuth2 client for mobile applications
+    Handles authorization flow, token management, and PKCE
+    """
+    
+    def __init__(self, client_id: str, redirect_uri: str, auth_endpoint: str, token_endpoint: str):
+        """
+        Initialize mobile auth client
+        
         Args:
             client_id: OAuth2 client ID
-            client_secret: OAuth2 client secret
             redirect_uri: Redirect URI for OAuth2 callback
             auth_endpoint: Authorization endpoint URL
             token_endpoint: Token endpoint URL
-            scopes: List of scopes to request (optional)
         """
         self.client_id = client_id
-        self.client_secret = client_secret
         self.redirect_uri = redirect_uri
         self.auth_endpoint = auth_endpoint
         self.token_endpoint = token_endpoint
-        self.scopes = scopes or ["openid", "profile"]
-        
-        # Token storage
-        self.access_token: Optional[str] = None
-        self.refresh_token: Optional[str] = None
-        self.token_expiry: Optional[datetime] = None
-        self.id_token: Optional[str] = None
-        
-        # PKCE support
         self.code_verifier: Optional[str] = None
-        self.code_challenge: Optional[str] = None
-
-    def generate_pkce_pair(self) -> Tuple[str, str]:
+        self.state: Optional[str] = None
+        self.tokens: Dict[str, TokenResponse] = {}
+        self.token_issued_at: Dict[str, datetime] = {}
+    
+    def generate_authorization_url(self, scope: Optional[str] = None, use_pkce: bool = True) -> str:
         """
-        Generate PKCE (Proof Key for Public Clients) code verifier and challenge.
-
-        Returns:
-            Tuple of (code_verifier, code_challenge)
-        """
-        # Generate a random code verifier (43-128 characters)
-        code_verifier = secrets.token_urlsafe(32)
+        Generate authorization URL for mobile client
         
-        # Create code challenge from verifier
-        code_challenge = hashlib.sha256(code_verifier.encode()).digest()
-        # URL-safe base64 encode without padding
-        code_challenge = (
-            __import__("base64")
-            .urlsafe_b64encode(code_challenge)
-            .decode()
-            .rstrip("=")
+        Args:
+            scope: Space-separated list of requested scopes
+            use_pkce: Whether to use PKCE flow (recommended for mobile)
+            
+        Returns:
+            Authorization URL to redirect user to
+        """
+        # Generate state for CSRF protection
+        self.state = secrets.token_urlsafe(32)
+        
+        # Generate PKCE parameters if requested
+        code_challenge = None
+        code_challenge_method = None
+        if use_pkce:
+            self.code_verifier = PKCEFlow.generate_code_verifier()
+            code_challenge, code_challenge_method = PKCEFlow.generate_code_challenge(
+                self.code_verifier
+            )
+        
+        # Create authorization request
+        auth_request = AuthorizationRequest(
+            client_id=self.client_id,
+            redirect_uri=self.redirect_uri,
+            response_type="code",
+            scope=scope,
+            state=self.state,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
         )
         
-        self.code_verifier = code_verifier
-        self.code_challenge = code_challenge
+        return f"{self.auth_endpoint}?{auth_request.to_query_params()}"
+    
+    def handle_authorization_response(self, redirect_url: str, expected_state: Optional[str] = None) -> str:
+        """
+        Handle authorization response from OAuth2 provider
         
-        logger.debug("Generated PKCE code pair")
-        return code_verifier, code_challenge
-
-    def get_authorization_url(self, use_pkce: bool = True, state: Optional[str] = None) -> str:
-        """
-        Generate the authorization URL for the user to visit.
-
         Args:
-            use_pkce: Whether to use PKCE (recommended for mobile)
-            state: Optional state parameter for CSRF protection
-
+            redirect_url: The redirect URL containing authorization code
+            expected_state: Expected state value for CSRF validation
+            
         Returns:
-            Authorization URL
-        """
-        if use_pkce:
-            self.generate_pkce_pair()
-
-        # Generate state if not provided
-        if state is None:
-            state = secrets.token_urlsafe(32)
-
-        params = {
-            "client_id": self.client_id,
-            "redirect_uri": self.redirect_uri,
-            "response_type": "code",
-            "scope": " ".join(self.scopes),
-            "state": state,
-        }
-
-        if use_pkce and self.code_challenge:
-            params["code_challenge"] = self.code_challenge
-            params["code_challenge_method"] = "S256"
-
-        auth_url = f"{self.auth_endpoint}?{urlencode(params)}"
-        logger.debug(f"Generated authorization URL with state: {state}")
-        return auth_url
-
-    def exchange_code_for_token(self, authorization_code: str) -> Dict[str, any]:
-        """
-        Exchange authorization code for access token.
-
-        Args:
-            authorization_code: Authorization code from callback
-
-        Returns:
-            Dictionary containing token response with keys:
-                - access_token: The access token
-                - token_type: Type of token (usually 'Bearer')
-                - expires_in: Token expiration time in seconds
-                - refresh_token: Refresh token (if provided)
-                - id_token: ID token for OpenID Connect (if provided)
-                - scope: Granted scopes
-
+            Authorization code for token exchange
+            
         Raises:
-            ValueError: If code exchange fails
-            ImportError: If requests library is not available
+            ValueError: If response is invalid or state doesn't match
         """
-        if requests is None:
-            raise ImportError("requests library is required for token exchange")
-
-        payload = {
-            "grant_type": "authorization_code",
-            "code": authorization_code,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "redirect_uri": self.redirect_uri,
+        parsed_url = urlparse(redirect_url)
+        query_params = parse_qs(parsed_url.query)
+        
+        # Check for errors
+        if 'error' in query_params:
+            error = query_params['error'][0]
+            error_description = query_params.get('error_description', ['Unknown error'])[0]
+            raise ValueError(f"Authorization error: {error} - {error_description}")
+        
+        # Validate state parameter
+        state = query_params.get('state', [None])[0]
+        expected = expected_state or self.state
+        if state != expected:
+            raise ValueError("State parameter mismatch - possible CSRF attack")
+        
+        # Extract authorization code
+        code = query_params.get('code', [None])[0]
+        if not code:
+            raise ValueError("No authorization code in response")
+        
+        return code
+    
+    def exchange_code_for_token(self, code: str, http_client: Any) -> TokenResponse:
+        """
+        Exchange authorization code for access token
+        
+        Args:
+            code: Authorization code from OAuth2 provider
+            http_client: HTTP client with post method for token request
+            
+        Returns:
+            TokenResponse containing access token and metadata
+        """
+        token_data = {
+            'grant_type': 'authorization_code',
+            'client_id': self.client_id,
+            'code': code,
+            'redirect_uri': self.redirect_uri,
         }
-
-        # Add PKCE code verifier if using PKCE
+        
+        # Include PKCE verifier if available
         if self.code_verifier:
-            payload["code_verifier"] = self.code_verifier
-
-        try:
-            logger.debug("Exchanging authorization code for token")
-            response = requests.post(
-                self.token_endpoint,
-                data=payload,
-                headers={"Accept": "application/json"},
-                timeout=10,
-            )
-            response.raise_for_status()
-            
-            token_response = response.json()
-            self._store_token_response(token_response)
-            
-            logger.info("Successfully exchanged authorization code for token")
-            return token_response
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Token exchange failed: {str(e)}")
-            raise ValueError(f"Token exchange failed: {str(e)}")
-
-    def refresh_access_token(self) -> Dict[str, any]:
+            token_data['code_verifier'] = self.code_verifier
+        
+        response = http_client.post(self.token_endpoint, data=token_data)
+        
+        if response.status_code != 200:
+            raise ValueError(f"Token exchange failed: {response.text}")
+        
+        token_json = response.json()
+        token_response = TokenResponse(**token_json)
+        
+        # Cache token
+        self.tokens['current'] = token_response
+        self.token_issued_at['current'] = datetime.utcnow()
+        
+        return token_response
+    
+    def get_access_token(self) -> Optional[str]:
         """
-        Refresh the access token using the refresh token.
-
+        Get current valid access token
+        
         Returns:
-            Dictionary containing new token response
-
-        Raises:
-            ValueError: If refresh token is not available or refresh fails
-            ImportError: If requests library is not available
+            Access token if available and valid, None otherwise
         """
-        if requests is None:
-            raise ImportError("requests library is required for token refresh")
-
-        if not self.refresh_token:
-            raise ValueError("No refresh token available")
-
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.refresh_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-        }
-
-        try:
-            logger.debug("Refreshing access token")
-            response = requests.post(
-                self.token_endpoint,
-                data=payload,
-                headers={"Accept": "application/json"},
-                timeout=10,
-            )
-            response.raise_for_status()
-            
-            token_response = response.json()
-            self._store_token_response(token_response)
-            
-            logger.info("Successfully refreshed access token")
-            return token_response
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Token refresh failed: {str(e)}")
-            raise ValueError(f"Token refresh failed: {str(e)}")
-
-    def _store_token_response(self, token_response: Dict[str, any]) -> None:
+        token = self.tokens.get('current')
+        if not token:
+            return None
+        
+        issued_at = self.token_issued_at.get('current')
+        if token.is_expired(issued_at):
+            return None
+        
+        return token.access_token
+    
+    def refresh_access_token(self, http_client: Any) -> Optional[TokenResponse]:
         """
-        Store token response data in instance variables.
-
+        Refresh access token using refresh token
+        
         Args:
-            token_response: Token response from authorization server
-        """
-        self.access_token = token_response.get("access_token")
-        self.refresh_token = token_response.get("refresh_token", self.refresh_token)
-        self.id_token = token_response.get("id_token")
-        
-        # Calculate token expiry time
-        expires_in = token_response.get("expires_in")
-        if expires_in:
-            self.token_expiry = datetime.utcnow() + timedelta(seconds=int(expires_in))
-            logger.debug(f"Token will expire at: {self.token_expiry}")
-
-    def is_token_expired(self) -> bool:
-        """
-        Check if the current access token is expired.
-
+            http_client: HTTP client with post method for token request
+            
         Returns:
-            True if token is expired or not set, False otherwise
+            New TokenResponse or None if refresh fails
         """
-        if not self.access_token or not self.token_expiry:
-            return True
+        token = self.tokens.get('current')
+        if not token or not token.refresh_token:
+            return None
         
-        # Consider token expired if less than 1 minute remaining
-        return datetime.utcnow() >= (self.token_expiry - timedelta(minutes=1))
-
-    def get_valid_access_token(self) -> str:
-        """
-        Get a valid access token, refreshing if necessary.
-
-        Returns:
-            Valid access token
-
-        Raises:
-            ValueError: If token cannot be obtained or refreshed
-        """
-        if self.is_token_expired():
-            if self.refresh_token:
-                self.refresh_access_token()
-            else:
-                raise ValueError("Token expired and no refresh token available")
-        
-        if not self.access_token:
-            raise ValueError("No access token available")
-        
-        return self.access_token
-
-    def get_authorization_header(self) -> Dict[str, str]:
-        """
-        Get the Authorization header for API requests.
-
-        Returns:
-            Dictionary with Authorization header
-
-        Raises:
-            ValueError: If no valid access token is available
-        """
-        token = self.get_valid_access_token()
-        return {"Authorization": f"Bearer {token}"}
-
-    def revoke_token(self, revoke_endpoint: str) -> bool:
-        """
-        Revoke the access token.
-
-        Args:
-            revoke_endpoint: Token revocation endpoint URL
-
-        Returns:
-            True if revocation was successful, False otherwise
-
-        Raises:
-            ImportError: If requests library is not available
-        """
-        if requests is None:
-            raise ImportError("requests library is required for token revocation")
-
-        if not self.access_token:
-            logger.warning("No access token to revoke")
-            return False
-
-        payload = {
-            "token": self.access_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
+        token_data = {
+            'grant_type': 'refresh_token',
+            'client_id': self.client_id,
+            'refresh_token': token.refresh_token,
         }
-
+        
         try:
-            logger.debug("Revoking access token")
-            response = requests.post(
-                revoke_endpoint,
-                data=payload,
-                timeout=10,
-            )
-            response.raise_for_status()
+            response = http_client.post(self.token_endpoint, data=token_data)
+            if response.status_code != 200:
+                return None
             
-            # Clear token data
-            self.access_token = None
-            self.refresh_token = None
-            self.token_expiry = None
-            self.id_token = None
+            token_json = response.json()
+            new_token = TokenResponse(**token_json)
             
-            logger.info("Successfully revoked access token")
-            return True
+            # Update cached token
+            self.tokens['current'] = new_token
+            self.token_issued_at['current'] = datetime.utcnow()
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Token revocation failed: {str(e)}")
-            return False
-
-    def get_token_info(self) -> Dict[str, any]:
-        """
-        Get information about the current token.
-
-        Returns:
-            Dictionary containing token information
-        """
-        return {
-            "access_token": self.access_token[:20] + "..." if self.access_token else None,
-            "has_refresh_token": self.refresh_token is not None,
-            "token_expired": self.is_token_expired(),
-            "token_expiry": self.token_expiry.isoformat() if self.token_expiry else None,
-            "has_id_token": self.id_token is not None,
-            "scopes": self.scopes,
-        }
-
+            return new_token
+        except Exception as e:
+            logger.error(f"Token refresh failed: {e}")
+            return None
+    
     def clear_tokens(self) -> None:
-        """Clear all stored tokens."""
-        self.access_token = None
-        self.refresh_token = None
-        self.token_expiry = None
-        self.id_token = None
+        """Clear cached tokens"""
+        self.tokens.clear()
+        self.token_issued_at.clear()
         self.code_verifier = None
-        self.code_challenge = None
-        logger.info("All tokens cleared")
-
-
-class OAuth2MobileAuthFlow:
-    """
-    Helper class to manage the complete OAuth2 mobile authentication flow.
-    """
-
-    def __init__(self, auth_handler: OAuth2MobileAuth):
-        """
-        Initialize the authentication flow handler.
-
-        Args:
-            auth_handler: OAuth2MobileAuth instance
-        """
-        self.auth = auth_handler
         self.state = None
 
-    def start_authentication(self, use_pkce: bool = True) -> str:
-        """
-        Start the authentication flow and return the authorization URL.
 
+class MobileAuthManager:
+    """
+    Manager for multiple mobile auth clients and sessions
+    """
+    
+    def __init__(self):
+        """Initialize auth manager"""
+        self.clients: Dict[str, MobileAuthClient] = {}
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+    
+    def register_client(self, client_id: str, client: MobileAuthClient) -> None:
+        """
+        Register a mobile auth client
+        
         Args:
-            use_pkce: Whether to use PKCE
-
-        Returns:
-            Authorization URL for the user to visit
+            client_id: Unique client identifier
+            client: MobileAuthClient instance
         """
-        self.state = secrets.token_urlsafe(32)
-        auth_url = self.auth.get_authorization_url(use_pkce=use_pkce, state=self.state)
-        logger.info("Authentication flow started")
-        return auth_url
-
-    def handle_callback(self, callback_url: str) -> bool:
+        self.clients[client_id] = client
+    
+    def get_client(self, client_id: str) -> Optional[MobileAuthClient]:
+        """Get registered client"""
+        return self.clients.get(client_id)
+    
+    def create_session(self, session_id: str, client_id: str) -> None:
         """
-        Handle the OAuth2 callback and exchange code for token.
-
+        Create a new auth session
+        
         Args:
-            callback_url: Full callback URL with code and state
-
-        Returns:
-            True if authentication successful, False otherwise
+            session_id: Unique session identifier
+            client_id: Client ID for this session
         """
-        try:
-            # Parse callback URL
-            parsed = urlparse(callback_url)
-            query_params = parse_qs(parsed.query)
-            
-            # Verify state parameter
-            returned_state = query_params.get("state", [None])[0]
-            if returned_state != self.state:
-                logger.error("State parameter mismatch - possible CSRF attack")
-                return False
-            
-            # Check for errors
-            error = query_params.get("error", [None])[0]
-            if error:
-                error_description = query_params.get("error_description", [None])[0]
-                logger.error(f"Authorization error: {error} - {error_description}")
-                return False
-            
-            # Exchange code for token
-            code = query_params.get("code", [None])[0]
-            if not code:
-                logger.error("No authorization code in callback")
-                return False
-            
-            self.auth.exchange_code_for_token(code)
-            logger.info("Successfully completed authentication flow")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error handling callback: {str(e)}")
-            return False
+        if client_id not in self.clients:
+            raise ValueError(f"Unknown client: {client_id}")
+        
+        self.sessions[session_id] = {
+            'client_id': client_id,
+            'created_at': datetime.utcnow(),
+            'token': None,
+        }
+    
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get session data"""
+        return self.sessions.get(session_id)
+    
+    def cleanup_expired_sessions(self, max_age_hours: int = 24) -> None:
+        """
+        Remove expired sessions
+        
+        Args:
+            max_age_hours: Maximum session age in hours
+        """
+        cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
+        expired = [
+            sid for sid, data in self.sessions.items()
+            if data['created_at'] < cutoff_time
+        ]
+        for sid in expired:
+            del self.sessions[sid]
