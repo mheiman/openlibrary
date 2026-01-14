@@ -46,6 +46,32 @@ plugin_modules:
     - openlibrary
     - infogami.plugins.links
     - infogami.plugins.api
+    - openlibrary.plugins.oauth2
+
+# OAuth2 Client Configuration
+oauth2_clients:
+    - client_id: mobile_app
+      client_secret: CHANGEME_mobile_app_secret
+      name: OpenLibrary Mobile App
+      description: Official OpenLibrary mobile application
+      redirect_uris:
+          - http://localhost:8080/oauth2/callback
+      scopes:
+          - openid
+          - profile
+          - email
+      is_confidential: true
+    - client_id: ol_reader_app
+      client_secret: mobile_app_secret
+      name: Open Library Reader
+      description: Mobile reader app for Open Library
+      redirect_uris:
+          - https://mheiman.github.io/openlibrary_reader/oauth-redirect.html
+      scopes:
+          - openid
+          - profile
+          - email
+      is_confidential: true
 
 plugin_worksearch:
     solr_next: true
